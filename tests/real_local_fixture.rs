@@ -65,7 +65,10 @@ fn link_local_real_fixture_file() {
             if ch.is_ascii_digit() || ch == '-' {
                 token.push(ch);
             } else if !token.is_empty() {
-                let compact = token.chars().filter(|c| c.is_ascii_digit()).collect::<String>();
+                let compact = token
+                    .chars()
+                    .filter(|c| c.is_ascii_digit())
+                    .collect::<String>();
                 if compact.len() == 13 {
                     return Some(compact);
                 }
@@ -73,17 +76,25 @@ fn link_local_real_fixture_file() {
             }
         }
 
-        let compact = token.chars().filter(|c| c.is_ascii_digit()).collect::<String>();
+        let compact = token
+            .chars()
+            .filter(|c| c.is_ascii_digit())
+            .collect::<String>();
         (compact.len() == 13).then_some(compact)
     }
 
     let Some(real_file) = configured_fixture_path() else {
-        eprintln!("skipping real fixture test: no LOCAL_ANNA_REAL_TEST_FILE and /tmp/aa_test_files is absent");
+        eprintln!(
+            "skipping real fixture test: no LOCAL_ANNA_REAL_TEST_FILE and /tmp/aa_test_files is absent"
+        );
         return;
     };
 
     if !real_file.is_file() {
-        eprintln!("skipping real fixture test: not a file: {}", real_file.display());
+        eprintln!(
+            "skipping real fixture test: not a file: {}",
+            real_file.display()
+        );
         return;
     }
 

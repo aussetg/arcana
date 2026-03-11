@@ -6,8 +6,12 @@ use rusqlite::Connection;
 
 #[derive(Debug, Args)]
 pub struct SearchArgs {
-    #[arg(long, value_name = "PATH", help = "Path to the SQLite database")]
-    pub db: PathBuf,
+    #[arg(
+        long,
+        value_name = "PATH",
+        help = "Path to the SQLite database (defaults to config file or ~/.config/arcana/arcana.sqlite3)"
+    )]
+    pub db: Option<PathBuf>,
 
     #[arg(value_name = "QUERY")]
     pub query: Option<String>,
@@ -46,18 +50,16 @@ pub struct SearchArgs {
 
     #[arg(
         long,
-        default_value = "llama-cli",
         value_name = "COMMAND",
-        help = "Command used to invoke the local expansion provider"
+        help = "Command used to invoke the local expansion provider (defaults to config file or llama-cli)"
     )]
-    pub expand_command: String,
+    pub expand_command: Option<String>,
 
     #[arg(
         long,
-        default_value_t = 8,
-        help = "Timeout in seconds for the expansion provider"
+        help = "Timeout in seconds for the expansion provider (defaults to config file or 8)"
     )]
-    pub expand_timeout: u64,
+    pub expand_timeout: Option<u64>,
 
     #[arg(long)]
     pub language: Option<String>,
@@ -90,8 +92,11 @@ pub fn run(args: SearchArgs) -> Result<()> {
         bail!("use only one of QUERY, --isbn, --doi, or --md5 at a time")
     }
 
-    let conn = Connection::open(&args.db)
-        .with_context(|| format!("failed to open {}", args.db.display()))?;
+    let config = crate::config::load()?;
+    let db_path = args.db.clone().unwrap_or(config.db_path()?);
+
+    let conn = Connection::open(&db_path)
+        .with_context(|| format!("failed to open {}", db_path.display()))?;
     crate::db::pragmas::apply_query_pragmas(&conn)?;
 
     let filters = crate::search::query::SearchFilters {
@@ -107,16 +112,26 @@ pub fn run(args: SearchArgs) -> Result<()> {
         }
         let output = crate::search::search_keyword_with_expansion(
             &conn,
-            &args.db,
+            &db_path,
             &query,
             &filters,
             &crate::search::expand::ExpansionOptions {
                 enabled: args.expand,
                 debug: args.expand_debug,
-                cache_path: args.expand_cache.clone(),
-                provider_command: args.expand_command.clone(),
-                model_path: args.expand_model.clone(),
-                timeout_secs: args.expand_timeout,
+                cache_path: args
+                    .expand_cache
+                    .clone()
+                    .or_else(|| config.expand_cache_path()),
+                provider_command: args
+                    .expand_command
+                    .clone()
+                    .unwrap_or_else(|| config.expand_command().to_string()),
+                model_path: Some(
+                    args.expand_model
+                        .clone()
+                        .unwrap_or_else(|| config.expand_model_path()),
+                ),
+                timeout_secs: args.expand_timeout.unwrap_or(config.expand_timeout_secs()),
                 max_candidates: 4,
             },
         )?;

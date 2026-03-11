@@ -19,10 +19,12 @@
  - optional `--language`, `--extension`, and `--year` filters
  - local file linkage into `records.local_path`
  - optional local-LLM query expansion with sidecar caching and fail-open fallback
+ - member fast-download workflow via Anna's Archive API
+ - YAML config support via `~/.config/arcana/config.yaml`
 
  Not implemented yet:
 
- - download workflow
+ - additional download-provider strategies beyond the fast-download API
 
  ## Goal
 
@@ -51,6 +53,17 @@
 
  ## Current commands
 
+ Config file:
+
+ ```yaml
+ # ~/.config/arcana/config.yaml
+ db_path: "~/.config/arcana/arcana.sqlite3"
+ download_dir: "~/Downloads"
+ secret_key_env: "ANNAS_ARCHIVE_SECRET_KEY"
+ ```
+
+ Command-line flags override config values.
+
  Initialize an empty database:
 
  ```sh
@@ -77,6 +90,15 @@
 
  ```sh
  cargo run -- search --db data/arcana.sqlite3 --isbn 9780131103627
+ ```
+
+ Download by ISBN:
+
+ ```sh
+ ANNAS_ARCHIVE_SECRET_KEY=... \
+ cargo run -- download \
+   --db data/arcana.sqlite3 \
+   --isbn 9780131103627
  ```
 
  Local file linkage:
@@ -129,4 +151,6 @@
  - backward compatibility is not a goal
  - rebuildability is preferred over migration machinery
  - code should stay small, readable, and fast enough to feel good on a Linux workstation
- - the repository now contains ingest, local search, local file linkage, and opt-in local-LLM query expansion
+ - set `ANNAS_ARCHIVE_SECRET_KEY` in your environment before using `download`
+ - by default, config lives in `~/.config/arcana/config.yaml`, DB defaults to `~/.config/arcana/arcana.sqlite3`, and downloads default to the XDG Downloads directory
+ - the repository now contains ingest, local search, local file linkage, opt-in local-LLM query expansion, config-file support, and fast-download support

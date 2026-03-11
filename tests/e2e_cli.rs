@@ -84,9 +84,8 @@ fn build_search_and_link_local_cli_end_to_end() {
     ]);
     assert!(exact_out.contains("The Essential Guide to N-of-1 Trials in Health"));
 
-    let portable_file = books.join(
-        "The Essential Guide to N-of-1 Trials in Health -- 9789401771993 -- local copy.pdf",
-    );
+    let portable_file = books
+        .join("The Essential Guide to N-of-1 Trials in Health -- 9789401771993 -- local copy.pdf");
     fs::write(&portable_file, b"portable fixture").unwrap();
 
     let dry_run = Command::new(bin())

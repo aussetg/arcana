@@ -20,9 +20,9 @@ pub struct BuildArgs {
     #[arg(
         long,
         value_name = "PATH",
-        help = "Path to the SQLite database to create"
+        help = "Path to the SQLite database to create (defaults to config file or ~/.config/arcana/arcana.sqlite3)"
     )]
-    pub output: PathBuf,
+    pub output: Option<PathBuf>,
 
     #[arg(long, help = "Replace an existing database file at --output")]
     pub replace: bool,
@@ -42,13 +42,16 @@ pub fn run(args: BuildArgs) -> Result<()> {
         bail!("--batch-size must be greater than zero");
     }
 
-    prepare_output_path(&args.output, args.replace)?;
+    let config = crate::config::load()?;
+    let output = args.output.unwrap_or(config.db_path()?).to_path_buf();
 
-    let mut conn = Connection::open(&args.output)
-        .with_context(|| format!("failed to open {}", args.output.display()))?;
+    prepare_output_path(&output, args.replace)?;
+
+    let mut conn = Connection::open(&output)
+        .with_context(|| format!("failed to open {}", output.display()))?;
 
     crate::db::prepare_database(&conn)
-        .with_context(|| format!("failed to initialize {}", args.output.display()))?;
+        .with_context(|| format!("failed to initialize {}", output.display()))?;
 
     let mut total_files = 0usize;
     let mut total_lines = 0usize;
@@ -96,18 +99,18 @@ pub fn run(args: BuildArgs) -> Result<()> {
     }
 
     crate::db::populate_fts(&conn)
-        .with_context(|| format!("failed to populate FTS in {}", args.output.display()))?;
+        .with_context(|| format!("failed to populate FTS in {}", output.display()))?;
 
     crate::db::finalize_database(&conn)
-        .with_context(|| format!("failed to finalize {}", args.output.display()))?;
+        .with_context(|| format!("failed to finalize {}", output.display()))?;
 
     if args.input.is_some() {
         println!(
             "built database: {} (files: {total_files}, lines: {total_lines}, records: {total_records}, codes: {total_codes})",
-            args.output.display()
+            output.display()
         );
     } else {
-        println!("initialized empty database: {}", args.output.display());
+        println!("initialized empty database: {}", output.display());
     }
 
     Ok(())

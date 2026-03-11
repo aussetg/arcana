@@ -9,8 +9,12 @@ use rusqlite::{Connection, params};
 
 #[derive(Debug, Args)]
 pub struct LinkLocalArgs {
-    #[arg(long, value_name = "PATH", help = "Path to the SQLite database")]
-    pub db: PathBuf,
+    #[arg(
+        long,
+        value_name = "PATH",
+        help = "Path to the SQLite database (defaults to config file or ~/.config/arcana/arcana.sqlite3)"
+    )]
+    pub db: Option<PathBuf>,
 
     #[arg(
         long,
@@ -102,8 +106,11 @@ pub fn run(args: LinkLocalArgs) -> Result<()> {
         bail!("scan path is not a directory: {}", args.scan.display());
     }
 
-    let mut conn = Connection::open(&args.db)
-        .with_context(|| format!("failed to open {}", args.db.display()))?;
+    let config = crate::config::load()?;
+    let db_path = args.db.clone().unwrap_or(config.db_path()?);
+
+    let mut conn = Connection::open(&db_path)
+        .with_context(|| format!("failed to open {}", db_path.display()))?;
     crate::db::pragmas::apply_query_pragmas(&conn)?;
 
     let files = discover_local_files(&args.scan, args.max_files)?;
