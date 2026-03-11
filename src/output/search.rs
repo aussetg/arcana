@@ -1,10 +1,49 @@
 use crate::model::SearchResult;
 use crate::search::expand::ExpansionDebugReport;
+use crate::search::query::SearchFilters;
+use serde::Serialize;
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub struct SearchReport {
+    pub query_kind: String,
+    pub query: String,
+    pub filters: SearchReportFilters,
+    pub result_count: usize,
     pub results: Vec<SearchResult>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub expansion_debug: Option<ExpansionDebugReport>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct SearchReportFilters {
+    pub language: Option<String>,
+    pub extension: Option<String>,
+    pub year: Option<i32>,
+    pub limit: usize,
+}
+
+impl SearchReport {
+    pub fn new(
+        query_kind: impl Into<String>,
+        query: impl Into<String>,
+        filters: &SearchFilters,
+        results: Vec<SearchResult>,
+        expansion_debug: Option<ExpansionDebugReport>,
+    ) -> Self {
+        Self {
+            query_kind: query_kind.into(),
+            query: query.into(),
+            filters: SearchReportFilters {
+                language: filters.language.clone(),
+                extension: filters.extension.clone(),
+                year: filters.year,
+                limit: filters.limit,
+            },
+            result_count: results.len(),
+            results,
+            expansion_debug,
+        }
+    }
 }
 
 pub fn print_text(report: &SearchReport) {
@@ -20,6 +59,11 @@ pub fn print_text(report: &SearchReport) {
     for (index, result) in report.results.iter().enumerate() {
         print_result(index + 1, result);
     }
+}
+
+pub fn print_json(report: &SearchReport) -> anyhow::Result<()> {
+    println!("{}", serde_json::to_string_pretty(report)?);
+    Ok(())
 }
 
 fn print_expansion_debug(report: &ExpansionDebugReport) {

@@ -6,6 +6,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use flate2::Compression;
 use flate2::write::GzEncoder;
 use rusqlite::Connection;
+use serde_json::Value;
 
 fn bin() -> PathBuf {
     std::env::var_os("CARGO_BIN_EXE_arcana")
@@ -74,6 +75,19 @@ fn build_search_and_link_local_cli_end_to_end() {
         "large language models",
     ]);
     assert!(search_out.contains("Large Language Models in Practice"));
+
+    let search_json = run_ok(&[
+        "search",
+        "--db",
+        db.to_str().unwrap(),
+        "--json",
+        "large language models",
+    ]);
+    let search_value: Value = serde_json::from_str(&search_json).unwrap();
+    assert_eq!(search_value["query_kind"], "keyword");
+    assert_eq!(search_value["query"], "large language models");
+    assert_eq!(search_value["result_count"], 1);
+    assert_eq!(search_value["results"][0]["aa_id"], "aa-llm-1");
 
     let exact_out = run_ok(&[
         "search",

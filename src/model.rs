@@ -1,3 +1,5 @@
+use serde::Serialize;
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FlatRecord {
     pub aa_id: String,
@@ -36,7 +38,7 @@ pub struct ExtractedRecord {
     pub codes: Vec<ExactCode>,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct SearchResult {
     pub aa_id: String,
     pub title: Option<String>,

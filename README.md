@@ -86,6 +86,12 @@
  cargo run -- search --db data/arcana.sqlite3 "large language models"
  ```
 
+ Keyword search as JSON:
+
+ ```sh
+ cargo run -- search --db data/arcana.sqlite3 --json "large language models"
+ ```
+
  Exact lookup:
 
  ```sh

@@ -74,6 +74,9 @@ pub struct SearchArgs {
 
     #[arg(long, default_value_t = 20)]
     pub limit: usize,
+
+    #[arg(long, help = "Emit machine-readable JSON output")]
+    pub json: bool,
 }
 
 pub fn run(args: SearchArgs) -> Result<()> {
@@ -108,7 +111,7 @@ pub fn run(args: SearchArgs) -> Result<()> {
         limit: args.limit,
     };
 
-    let (results, expansion_debug) = if let Some(query) = args.query {
+    let (query_kind, query_text, results, expansion_debug) = if let Some(query) = args.query {
         if !crate::search::has_fts_rows(&conn)? {
             bail!("database has no populated FTS index; rebuild with `build --input ...`")
         }
@@ -138,19 +141,25 @@ pub fn run(args: SearchArgs) -> Result<()> {
             },
         )?;
 
-        (output.results, output.expansion)
+        ("keyword", query, output.results, output.expansion)
     } else if let Some(isbn) = args.isbn {
         (
+            "isbn",
+            isbn.clone(),
             crate::search::search_exact(&conn, &["isbn10", "isbn13"], &isbn, &filters)?,
             None,
         )
     } else if let Some(doi) = args.doi {
         (
+            "doi",
+            doi.clone(),
             crate::search::search_exact(&conn, &["doi"], &doi, &filters)?,
             None,
         )
     } else if let Some(md5) = args.md5 {
         (
+            "md5",
+            md5.clone(),
             crate::search::search_exact(&conn, &["md5"], &md5, &filters)?,
             None,
         )
@@ -158,10 +167,13 @@ pub fn run(args: SearchArgs) -> Result<()> {
         bail!("unreachable search mode")
     };
 
-    crate::output::search::print_text(&SearchReport {
-        results,
-        expansion_debug,
-    });
+    let report = SearchReport::new(query_kind, query_text, &filters, results, expansion_debug);
+
+    if args.json {
+        crate::output::search::print_json(&report)?;
+    } else {
+        crate::output::search::print_text(&report);
+    }
 
     Ok(())
 }

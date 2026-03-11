@@ -41,7 +41,7 @@ impl Default for ExpansionOptions {
     }
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct ExpansionDebugReport {
     pub attempted: bool,
     pub cache_path: PathBuf,
@@ -76,7 +76,7 @@ pub struct AcceptedExpansion {
     pub corpus_hits: i64,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct RejectedExpansion {
     pub text: String,
     pub reason: String,
