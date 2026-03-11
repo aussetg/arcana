@@ -57,8 +57,15 @@ pub fn print_json(config: &ResolvedConfig) -> Result<()> {
 
 #[derive(Debug, Serialize)]
 struct ConfigReport {
+    report_version: u32,
+    kind: &'static str,
     config_file: String,
     config_exists: bool,
+    values: ConfigValues,
+}
+
+#[derive(Debug, Serialize)]
+struct ConfigValues {
     db_path: ConfigValue<String>,
     download_dir: ConfigValue<String>,
     secret_key_env: ConfigValue<String>,
@@ -79,19 +86,23 @@ struct ConfigValue<T> {
 impl From<&ResolvedConfig> for ConfigReport {
     fn from(config: &ResolvedConfig) -> Self {
         Self {
+            report_version: 1,
+            kind: "config_report",
             config_file: config.config_file.display().to_string(),
             config_exists: config.config_exists,
-            db_path: config_path_value(&config.db_path),
-            download_dir: config_path_value(&config.download_dir),
-            secret_key_env: config_string_value(&config.secret_key_env),
-            secret_key_set: config.secret_key_is_set(),
-            fast_download_api_url: config_string_value(&config.fast_download_api_url),
-            expand_cache_path: config_path_value(&config.expand_cache_path),
-            expand_command: config_string_value(&config.expand_command),
-            expand_model_path: config_path_value(&config.expand_model_path),
-            expand_timeout_secs: ConfigValue {
-                value: config.expand_timeout_secs.value,
-                source: config.expand_timeout_secs.source,
+            values: ConfigValues {
+                db_path: config_path_value(&config.db_path),
+                download_dir: config_path_value(&config.download_dir),
+                secret_key_env: config_string_value(&config.secret_key_env),
+                secret_key_set: config.secret_key_is_set(),
+                fast_download_api_url: config_string_value(&config.fast_download_api_url),
+                expand_cache_path: config_path_value(&config.expand_cache_path),
+                expand_command: config_string_value(&config.expand_command),
+                expand_model_path: config_path_value(&config.expand_model_path),
+                expand_timeout_secs: ConfigValue {
+                    value: config.expand_timeout_secs.value,
+                    source: config.expand_timeout_secs.source,
+                },
             },
         }
     }

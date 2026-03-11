@@ -10,7 +10,7 @@ use md5::Context as Md5Context;
 use reqwest::StatusCode;
 use reqwest::blocking::Client;
 use reqwest::header::RANGE;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 use crate::records::RecordSummary;
 
@@ -20,7 +20,8 @@ struct FastDownloadResponse {
     error: Option<String>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum, Serialize)]
+#[serde(rename_all = "snake_case")]
 pub enum FilenameMode {
     Original,
     AaId,

@@ -308,9 +308,14 @@ fn config_cli_supports_path_init_and_json() {
         &["XDG_CONFIG_HOME", "XDG_DOWNLOAD_DIR"],
     );
     let json: Value = serde_json::from_str(&json_out).unwrap();
+    assert_eq!(json["report_version"], 1);
+    assert_eq!(json["kind"], "config_report");
     assert_eq!(json["config_exists"], true);
-    assert_eq!(json["db_path"]["source"], "config_file");
-    assert_eq!(json["secret_key_env"]["value"], "ANNAS_ARCHIVE_SECRET_KEY");
+    assert_eq!(json["values"]["db_path"]["source"], "config_file");
+    assert_eq!(
+        json["values"]["secret_key_env"]["value"],
+        "ANNAS_ARCHIVE_SECRET_KEY"
+    );
 
     let duplicate_init = Command::new(bin())
         .args(["config", "init"])
@@ -321,6 +326,71 @@ fn config_cli_supports_path_init_and_json() {
         .unwrap();
     assert!(!duplicate_init.status.success());
     assert!(String::from_utf8_lossy(&duplicate_init.stderr).contains("already exists"));
+
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn download_cli_supports_json_output_for_verified_existing_files() {
+    let root = unique_temp_dir("download-json");
+    let shard = root.join("aarecords__0.json.gz");
+    let db = root.join("arcana.sqlite3");
+    let output_dir = root.join("downloads");
+    fs::create_dir_all(&output_dir).unwrap();
+
+    let md5_value = format!("{:x}", md5::compute(b"hello"));
+    let ndjson = format!(
+        "{{\"_source\":{{\"id\":\"aa-download-1\",\"search_only_fields\":{{\"search_title\":\"Download Fixture\",\"search_author\":\"Fixture Author\",\"search_year\":\"2024\",\"search_most_likely_language_code\":[\"en\"],\"search_extension\":\"pdf\"}},\"file_unified_data\":{{\"identifiers_unified\":{{\"md5\":[\"{md5_value}\"]}}}}}}}}\n"
+    );
+    let file = fs::File::create(&shard).unwrap();
+    let mut encoder = GzEncoder::new(file, Compression::default());
+    use std::io::Write;
+    encoder.write_all(ndjson.as_bytes()).unwrap();
+    encoder.finish().unwrap();
+
+    run_ok(&[
+        "build",
+        "--input",
+        root.to_str().unwrap(),
+        "--output",
+        db.to_str().unwrap(),
+        "--replace",
+    ]);
+
+    let existing_file = output_dir.join("aa-download-1.pdf");
+    fs::write(&existing_file, b"hello").unwrap();
+
+    let json_out = run_ok(&[
+        "download",
+        "--db",
+        db.to_str().unwrap(),
+        "--md5",
+        &md5_value,
+        "--output-dir",
+        output_dir.to_str().unwrap(),
+        "--json",
+    ]);
+    let json: Value = serde_json::from_str(&json_out).unwrap();
+    assert_eq!(json["report_version"], 1);
+    assert_eq!(json["kind"], "download_report");
+    assert_eq!(json["request"]["selector"]["mode"], "md5");
+    assert_eq!(json["request"]["selector"]["value"], md5_value);
+    assert_eq!(json["record"]["aa_id"], "aa-download-1");
+    assert_eq!(json["outcome"]["status"], "already_present");
+    assert_eq!(json["outcome"]["network_used"], false);
+    assert_eq!(json["outcome"]["md5_checked"], true);
+    assert_eq!(json["outcome"]["md5_ok"], true);
+    assert_eq!(json["outcome"]["local_path_updated"], true);
+
+    let conn = Connection::open(&db).unwrap();
+    let local_path: Option<String> = conn
+        .query_row(
+            "SELECT local_path FROM records WHERE aa_id = 'aa-download-1'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(local_path.as_deref(), Some(existing_file.to_str().unwrap()));
 
     let _ = fs::remove_dir_all(root);
 }

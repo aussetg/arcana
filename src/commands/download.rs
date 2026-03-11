@@ -10,6 +10,9 @@ use crate::download::{
     FilenameMode, destination_path, download_to_path, file_matches_md5, request_fast_download_url,
     verify_file_md5,
 };
+use crate::output::download::{
+    DownloadOutcome, DownloadRecord, DownloadReport, DownloadRequest, DownloadStatus,
+};
 use crate::records::{RecordSelector, resolve_unique_record};
 
 #[derive(Debug, Args)]
@@ -58,6 +61,9 @@ pub struct DownloadArgs {
     #[arg(long, value_enum, default_value_t = FilenameMode::Original)]
     pub filename_mode: FilenameMode,
 
+    #[arg(long, help = "Emit machine-readable JSON output")]
+    pub json: bool,
+
     #[arg(long, help = "Do not update records.local_path after download")]
     pub no_link: bool,
 }
@@ -95,10 +101,30 @@ pub fn run(args: DownloadArgs) -> Result<()> {
 
     if destination.exists() {
         if file_matches_md5(&destination, record_md5)? {
+            let mut local_path_updated = false;
             if !args.no_link {
                 update_local_path(&mut conn, record.rid, &destination)?;
+                local_path_updated = true;
             }
-            println!("already present and verified: {}", destination.display());
+            let report = build_report(
+                &selector,
+                &record,
+                &output_dir,
+                &destination,
+                &args,
+                DownloadOutcome {
+                    status: DownloadStatus::AlreadyPresent,
+                    network_used: false,
+                    md5_checked: true,
+                    md5_ok: true,
+                    local_path_updated,
+                },
+            );
+            if args.json {
+                crate::output::download::print_json(&report)?;
+            } else {
+                crate::output::download::print_text(&report);
+            }
             return Ok(());
         }
 
@@ -139,8 +165,63 @@ pub fn run(args: DownloadArgs) -> Result<()> {
         update_local_path(&mut conn, record.rid, &destination)?;
     }
 
-    println!("downloaded: {}", destination.display());
+    let report = build_report(
+        &selector,
+        &record,
+        &output_dir,
+        &destination,
+        &args,
+        DownloadOutcome {
+            status: DownloadStatus::Downloaded,
+            network_used: true,
+            md5_checked: args.verify_md5,
+            md5_ok: args.verify_md5,
+            local_path_updated: !args.no_link,
+        },
+    );
+
+    if args.json {
+        crate::output::download::print_json(&report)?;
+    } else {
+        crate::output::download::print_text(&report);
+    }
+
     Ok(())
+}
+
+fn build_report(
+    selector: &RecordSelector,
+    record: &crate::records::RecordSummary,
+    output_dir: &Path,
+    destination: &Path,
+    args: &DownloadArgs,
+    outcome: DownloadOutcome,
+) -> DownloadReport {
+    DownloadReport {
+        report_version: 1,
+        kind: "download_report",
+        request: DownloadRequest {
+            selector: selector.into(),
+            output_dir: output_dir.display().to_string(),
+            output_name: args.output_name.clone(),
+            filename_mode: args.filename_mode,
+            replace_existing: args.replace_existing,
+            verify_md5: args.verify_md5,
+            no_link: args.no_link,
+            path_index: args.path_index,
+            domain_index: args.domain_index,
+        },
+        record: DownloadRecord {
+            aa_id: record.aa_id.clone(),
+            md5: record.md5.clone().unwrap_or_default(),
+            title: record.title.clone(),
+            author: record.author.clone(),
+            extension: record.extension.clone(),
+            original_filename: record.original_filename.clone(),
+        },
+        destination: destination.display().to_string(),
+        outcome,
+    }
 }
 
 fn update_local_path(conn: &mut Connection, rid: i64, destination: &Path) -> Result<()> {

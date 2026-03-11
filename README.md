@@ -109,6 +109,16 @@
    --isbn 9780131103627
  ```
 
+ Download as JSON:
+
+ ```sh
+ ANNAS_ARCHIVE_SECRET_KEY=... \
+ cargo run -- download \
+   --db data/arcana.sqlite3 \
+   --isbn 9780131103627 \
+   --json
+ ```
+
  Download with checksum verification and a flat output name:
 
  ```sh
@@ -121,6 +131,7 @@
  ```
 
  Interrupted downloads automatically resume from `.part` files when the server supports range requests.
+ Download JSON output is versioned and includes structured request and outcome objects.
 
  Show resolved config:
 
@@ -133,6 +144,8 @@
  ```sh
  cargo run -- config --json
  ```
+
+ Config JSON output is versioned and grouped under a structured `values` object.
 
  Show config file path:
 
