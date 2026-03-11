@@ -1,0 +1,11 @@
+image: alpine/edge
+secrets:
+  - 624310b6-12ce-4a03-99aa-72a3cb649732
+environment:
+  REPO: arcana
+  GH_USER: aussetg
+tasks:
+  - push-to-github: |
+      cd ~/"${REPO}"
+      git config --global credential.helper store
+      git push --mirror "https://github.com/${GH_USER}/${REPO}"
