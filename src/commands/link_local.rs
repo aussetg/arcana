@@ -7,6 +7,8 @@ use anyhow::{Context, Result, bail};
 use clap::Args;
 use rusqlite::{Connection, params};
 
+use crate::output::link_local::{LinkLocalEntry, LinkLocalRecord, LinkLocalReport, LinkLocalStats};
+
 #[derive(Debug, Args)]
 pub struct LinkLocalArgs {
     #[arg(
@@ -40,6 +42,9 @@ pub struct LinkLocalArgs {
 
     #[arg(long)]
     pub max_files: Option<usize>,
+
+    #[arg(long, help = "Emit a machine-readable JSON report")]
+    pub json: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -82,17 +87,26 @@ enum MatchMethod {
     TitleAuthor,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 struct LocalMatch {
-    rid: i64,
+    record: CandidateRecord,
     method: MatchMethod,
+    reason: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-struct HeuristicCandidate {
+struct CandidateRecord {
     rid: i64,
+    aa_id: String,
     title: Option<String>,
     author: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct AmbiguousMatch {
+    method: MatchMethod,
+    reason: String,
+    candidates: Vec<CandidateRecord>,
 }
 
 const NOISE_TERMS: &[&str] = &[
@@ -114,7 +128,7 @@ pub fn run(args: LinkLocalArgs) -> Result<()> {
     crate::db::pragmas::apply_query_pragmas(&conn)?;
 
     let files = discover_local_files(&args.scan, args.max_files)?;
-    let stats = link_local_files(
+    let report = link_local_files(
         &mut conn,
         &files,
         LinkOptions {
@@ -125,22 +139,11 @@ pub fn run(args: LinkLocalArgs) -> Result<()> {
         },
     )?;
 
-    println!(
-        "{}local files: scanned={} hashed_md5={} linked={} (md5={}, isbn={}, original_filename={}, title_author={}) unmatched={} ambiguous={}",
-        if args.dry_run { "dry-run " } else { "linked " },
-        stats.files_scanned,
-        stats.files_hashed_md5,
-        stats.linked_by_md5
-            + stats.linked_by_isbn
-            + stats.linked_by_original_filename
-            + stats.linked_by_title_author,
-        stats.linked_by_md5,
-        stats.linked_by_isbn,
-        stats.linked_by_original_filename,
-        stats.linked_by_title_author,
-        stats.unmatched,
-        stats.ambiguous,
-    );
+    if args.json {
+        crate::output::link_local::print_json(&report)?;
+    } else {
+        crate::output::link_local::print_summary(&report);
+    }
 
     Ok(())
 }
@@ -149,7 +152,7 @@ fn link_local_files(
     conn: &mut Connection,
     paths: &[PathBuf],
     options: LinkOptions,
-) -> Result<LinkStats> {
+) -> Result<LinkLocalReport> {
     let tx = conn.transaction()?;
     let mut update = if options.dry_run {
         None
@@ -157,6 +160,7 @@ fn link_local_files(
         Some(tx.prepare("UPDATE records SET local_path = ?1 WHERE rid = ?2")?)
     };
     let mut stats = LinkStats::default();
+    let mut entries = Vec::with_capacity(paths.len());
 
     for path in paths {
         stats.files_scanned += 1;
@@ -168,6 +172,15 @@ fn link_local_files(
                     eprintln!("[link-local] unreadable: {} ({error:#})", path.display());
                 }
                 stats.unmatched += 1;
+                entries.push(LinkLocalEntry {
+                    path: path.display().to_string(),
+                    status: "unreadable".to_string(),
+                    matched_by: None,
+                    reason: None,
+                    record: None,
+                    candidates: Vec::new(),
+                    error: Some(format!("{error:#}")),
+                });
                 continue;
             }
         };
@@ -181,15 +194,13 @@ fn link_local_files(
                 if let Some(update) = update.as_mut() {
                     update.execute(params![
                         info.canonical_path.display().to_string(),
-                        local_match.rid
+                        local_match.record.rid
                     ])?;
                 }
 
-                let aa_id = fetch_aa_id(&tx, local_match.rid)?;
-
                 if options.verbose {
                     eprintln!(
-                        "[link-local] {} [{}{}] {} -> {}",
+                        "[link-local] {} [{}{}] {} -> {} ({})",
                         if options.dry_run {
                             "would-link"
                         } else {
@@ -202,9 +213,24 @@ fn link_local_files(
                             ""
                         },
                         info.canonical_path.display(),
-                        aa_id
+                        local_match.record.aa_id,
+                        local_match.reason
                     );
                 }
+
+                entries.push(LinkLocalEntry {
+                    path: info.canonical_path.display().to_string(),
+                    status: if options.dry_run {
+                        "would_link".to_string()
+                    } else {
+                        "linked".to_string()
+                    },
+                    matched_by: Some(local_match.method.label().to_string()),
+                    reason: Some(local_match.reason),
+                    record: Some(LinkLocalRecord::from(&local_match.record)),
+                    candidates: Vec::new(),
+                    error: None,
+                });
 
                 match local_match.method {
                     MatchMethod::Md5 => stats.linked_by_md5 += 1,
@@ -213,17 +239,51 @@ fn link_local_files(
                     MatchMethod::TitleAuthor => stats.linked_by_title_author += 1,
                 }
             }
-            MatchSearchOutcome::Ambiguous => {
+            MatchSearchOutcome::Ambiguous(ambiguous) => {
                 if options.verbose {
-                    eprintln!("[link-local] ambiguous: {}", info.canonical_path.display());
+                    let candidate_ids = ambiguous
+                        .candidates
+                        .iter()
+                        .map(|candidate| candidate.aa_id.as_str())
+                        .collect::<Vec<_>>()
+                        .join(", ");
+                    eprintln!(
+                        "[link-local] ambiguous [{}] {} ({}) candidates: {}",
+                        ambiguous.method.label(),
+                        info.canonical_path.display(),
+                        ambiguous.reason,
+                        candidate_ids
+                    );
                 }
                 stats.ambiguous += 1;
+                entries.push(LinkLocalEntry {
+                    path: info.canonical_path.display().to_string(),
+                    status: "ambiguous".to_string(),
+                    matched_by: Some(ambiguous.method.label().to_string()),
+                    reason: Some(ambiguous.reason),
+                    record: None,
+                    candidates: ambiguous
+                        .candidates
+                        .iter()
+                        .map(LinkLocalRecord::from)
+                        .collect(),
+                    error: None,
+                });
             }
             MatchSearchOutcome::NoMatch => {
                 if options.verbose {
                     eprintln!("[link-local] unmatched: {}", info.canonical_path.display());
                 }
                 stats.unmatched += 1;
+                entries.push(LinkLocalEntry {
+                    path: info.canonical_path.display().to_string(),
+                    status: "unmatched".to_string(),
+                    matched_by: None,
+                    reason: None,
+                    record: None,
+                    candidates: Vec::new(),
+                    error: None,
+                });
             }
         }
     }
@@ -234,7 +294,20 @@ fn link_local_files(
     } else {
         tx.commit()?;
     }
-    Ok(stats)
+    Ok(LinkLocalReport {
+        dry_run: options.dry_run,
+        stats: LinkLocalStats {
+            files_scanned: stats.files_scanned,
+            files_hashed_md5: stats.files_hashed_md5,
+            linked_by_md5: stats.linked_by_md5,
+            linked_by_isbn: stats.linked_by_isbn,
+            linked_by_original_filename: stats.linked_by_original_filename,
+            linked_by_title_author: stats.linked_by_title_author,
+            unmatched: stats.unmatched,
+            ambiguous: stats.ambiguous,
+        },
+        entries,
+    })
 }
 
 impl MatchMethod {
@@ -248,18 +321,20 @@ impl MatchMethod {
     }
 }
 
-fn fetch_aa_id(conn: &Connection, rid: i64) -> Result<String> {
-    Ok(
-        conn.query_row("SELECT aa_id FROM records WHERE rid = ?1", [rid], |row| {
-            row.get(0)
-        })?,
-    )
+impl From<&CandidateRecord> for LinkLocalRecord {
+    fn from(value: &CandidateRecord) -> Self {
+        Self {
+            aa_id: value.aa_id.clone(),
+            title: value.title.clone(),
+            author: value.author.clone(),
+        }
+    }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 enum MatchSearchOutcome {
     Matched(LocalMatch),
-    Ambiguous,
+    Ambiguous(AmbiguousMatch),
     NoMatch,
 }
 
@@ -270,68 +345,107 @@ fn find_local_match(
 ) -> Result<MatchSearchOutcome> {
     for md5 in &info.md5_candidates {
         match find_unique_record_by_code(conn, "md5", md5, replace_existing)? {
-            UniqueLookup::Unique(rid) => {
+            UniqueLookup::Unique(record) => {
                 return Ok(MatchSearchOutcome::Matched(LocalMatch {
-                    rid,
+                    record,
                     method: MatchMethod::Md5,
+                    reason: format!("matched md5 {}", md5),
                 }));
             }
-            UniqueLookup::Ambiguous => return Ok(MatchSearchOutcome::Ambiguous),
+            UniqueLookup::Ambiguous(candidates) => {
+                return Ok(MatchSearchOutcome::Ambiguous(AmbiguousMatch {
+                    method: MatchMethod::Md5,
+                    reason: format!("multiple records matched md5 {}", md5),
+                    candidates,
+                }));
+            }
             UniqueLookup::None => {}
         }
     }
 
     for isbn13 in &info.isbn13_candidates {
         match find_unique_record_by_code(conn, "isbn13", isbn13, replace_existing)? {
-            UniqueLookup::Unique(rid) => {
+            UniqueLookup::Unique(record) => {
                 return Ok(MatchSearchOutcome::Matched(LocalMatch {
-                    rid,
+                    record,
                     method: MatchMethod::Isbn,
+                    reason: format!("matched isbn13 {}", isbn13),
                 }));
             }
-            UniqueLookup::Ambiguous => return Ok(MatchSearchOutcome::Ambiguous),
+            UniqueLookup::Ambiguous(candidates) => {
+                return Ok(MatchSearchOutcome::Ambiguous(AmbiguousMatch {
+                    method: MatchMethod::Isbn,
+                    reason: format!("multiple records matched isbn13 {}", isbn13),
+                    candidates,
+                }));
+            }
             UniqueLookup::None => {}
         }
     }
 
     for isbn10 in &info.isbn10_candidates {
         match find_unique_record_by_code(conn, "isbn10", isbn10, replace_existing)? {
-            UniqueLookup::Unique(rid) => {
+            UniqueLookup::Unique(record) => {
                 return Ok(MatchSearchOutcome::Matched(LocalMatch {
-                    rid,
+                    record,
                     method: MatchMethod::Isbn,
+                    reason: format!("matched isbn10 {}", isbn10),
                 }));
             }
-            UniqueLookup::Ambiguous => return Ok(MatchSearchOutcome::Ambiguous),
+            UniqueLookup::Ambiguous(candidates) => {
+                return Ok(MatchSearchOutcome::Ambiguous(AmbiguousMatch {
+                    method: MatchMethod::Isbn,
+                    reason: format!("multiple records matched isbn10 {}", isbn10),
+                    candidates,
+                }));
+            }
             UniqueLookup::None => {}
         }
     }
 
     match find_unique_record_by_original_filename(conn, &info.file_name, replace_existing)? {
-        UniqueLookup::Unique(rid) => {
+        UniqueLookup::Unique(record) => {
             return Ok(MatchSearchOutcome::Matched(LocalMatch {
-                rid,
+                record,
                 method: MatchMethod::OriginalFilename,
+                reason: format!("matched original filename {}", info.file_name),
             }));
         }
-        UniqueLookup::Ambiguous => return Ok(MatchSearchOutcome::Ambiguous),
+        UniqueLookup::Ambiguous(candidates) => {
+            return Ok(MatchSearchOutcome::Ambiguous(AmbiguousMatch {
+                method: MatchMethod::OriginalFilename,
+                reason: format!(
+                    "multiple records matched original filename {}",
+                    info.file_name
+                ),
+                candidates,
+            }));
+        }
         UniqueLookup::None => {}
     }
 
     match find_unique_record_by_title_author(conn, info, replace_existing)? {
-        UniqueLookup::Unique(rid) => Ok(MatchSearchOutcome::Matched(LocalMatch {
-            rid,
+        UniqueLookup::Unique(record) => Ok(MatchSearchOutcome::Matched(LocalMatch {
+            record,
             method: MatchMethod::TitleAuthor,
+            reason: format!("matched title/author terms {:?}", info.search_terms),
         })),
-        UniqueLookup::Ambiguous => Ok(MatchSearchOutcome::Ambiguous),
+        UniqueLookup::Ambiguous(candidates) => Ok(MatchSearchOutcome::Ambiguous(AmbiguousMatch {
+            method: MatchMethod::TitleAuthor,
+            reason: format!(
+                "multiple records matched title/author terms {:?}",
+                info.search_terms
+            ),
+            candidates,
+        })),
         UniqueLookup::None => Ok(MatchSearchOutcome::NoMatch),
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 enum UniqueLookup {
-    Unique(i64),
-    Ambiguous,
+    Unique(CandidateRecord),
+    Ambiguous(Vec<CandidateRecord>),
     None,
 }
 
@@ -342,18 +456,18 @@ fn find_unique_record_by_code(
     replace_existing: bool,
 ) -> Result<UniqueLookup> {
     let mut statement = conn.prepare(
-        "SELECT r.rid
+        "SELECT r.rid, r.aa_id, r.title, r.author
          FROM records r
          JOIN record_codes rc ON rc.rid = r.rid
          WHERE rc.kind = ?1
            AND lower(rc.value) = lower(?2)
            AND (?3 OR r.local_path IS NULL)
          ORDER BY r.rid
-         LIMIT 2",
+         LIMIT 3",
     )?;
 
     let rows = statement.query_map(params![kind, value, replace_existing], |row| {
-        row.get::<_, i64>(0)
+        map_candidate_record(row)
     })?;
     collapse_unique_lookup(rows.collect::<std::result::Result<Vec<_>, _>>()?)
 }
@@ -364,16 +478,16 @@ fn find_unique_record_by_original_filename(
     replace_existing: bool,
 ) -> Result<UniqueLookup> {
     let mut statement = conn.prepare(
-        "SELECT rid
+        "SELECT rid, aa_id, title, author
          FROM records
          WHERE lower(original_filename) = lower(?1)
            AND (?2 OR local_path IS NULL)
          ORDER BY rid
-         LIMIT 2",
+         LIMIT 3",
     )?;
 
     let rows = statement.query_map(params![file_name, replace_existing], |row| {
-        row.get::<_, i64>(0)
+        map_candidate_record(row)
     })?;
     collapse_unique_lookup(rows.collect::<std::result::Result<Vec<_>, _>>()?)
 }
@@ -396,7 +510,7 @@ fn find_unique_record_by_title_author(
         .join(" AND ");
 
     let mut statement = conn.prepare(
-        "SELECT r.rid, r.title, r.author
+        "SELECT r.rid, r.aa_id, r.title, r.author
          FROM records_fts
          JOIN records r ON r.rid = records_fts.rowid
          WHERE records_fts MATCH ?1
@@ -409,24 +523,19 @@ fn find_unique_record_by_title_author(
 
     let candidates = statement
         .query_map(params![query, replace_existing], |row| {
-            Ok(HeuristicCandidate {
-                rid: row.get(0)?,
-                title: row.get(1)?,
-                author: row.get(2)?,
-            })
+            map_candidate_record(row)
         })?
         .collect::<std::result::Result<Vec<_>, _>>()?;
 
     let matched = candidates
         .into_iter()
         .filter(|candidate| heuristic_accepts(candidate, info))
-        .map(|candidate| candidate.rid)
         .collect::<Vec<_>>();
 
     collapse_unique_lookup(matched)
 }
 
-fn heuristic_accepts(candidate: &HeuristicCandidate, info: &LocalFileInfo) -> bool {
+fn heuristic_accepts(candidate: &CandidateRecord, info: &LocalFileInfo) -> bool {
     let title = candidate.title.as_deref().map(normalize_for_match);
     let Some(title_norm) = title else {
         return false;
@@ -465,11 +574,20 @@ fn heuristic_accepts(candidate: &HeuristicCandidate, info: &LocalFileInfo) -> bo
         .any(|term| file_terms.contains(term.as_str()))
 }
 
-fn collapse_unique_lookup(values: Vec<i64>) -> Result<UniqueLookup> {
+fn map_candidate_record(row: &rusqlite::Row<'_>) -> rusqlite::Result<CandidateRecord> {
+    Ok(CandidateRecord {
+        rid: row.get(0)?,
+        aa_id: row.get(1)?,
+        title: row.get(2)?,
+        author: row.get(3)?,
+    })
+}
+
+fn collapse_unique_lookup(values: Vec<CandidateRecord>) -> Result<UniqueLookup> {
     Ok(match values.as_slice() {
         [] => UniqueLookup::None,
-        [rid] => UniqueLookup::Unique(*rid),
-        _ => UniqueLookup::Ambiguous,
+        [record] => UniqueLookup::Unique(record.clone()),
+        _ => UniqueLookup::Ambiguous(values),
     })
 }
 
@@ -813,7 +931,7 @@ mod tests {
         fs::write(&file2, b"b").unwrap();
         fs::write(&file3, b"c").unwrap();
 
-        let stats = link_local_files(
+        let report = link_local_files(
             &mut conn,
             &[file1.clone(), file2.clone(), file3.clone()],
             LinkOptions {
@@ -825,10 +943,10 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(stats.linked_by_md5, 1);
-        assert_eq!(stats.linked_by_original_filename, 1);
-        assert_eq!(stats.linked_by_title_author, 1);
-        assert_eq!(stats.unmatched, 0);
+        assert_eq!(report.stats.linked_by_md5, 1);
+        assert_eq!(report.stats.linked_by_original_filename, 1);
+        assert_eq!(report.stats.linked_by_title_author, 1);
+        assert_eq!(report.stats.unmatched, 0);
 
         let rows = conn
             .prepare("SELECT aa_id, local_path FROM records ORDER BY aa_id")
@@ -894,7 +1012,7 @@ mod tests {
         let file = dir.join("Filename Book.pdf");
         fs::write(&file, b"b").unwrap();
 
-        let stats = link_local_files(
+        let report = link_local_files(
             &mut conn,
             std::slice::from_ref(&file),
             LinkOptions {
@@ -906,7 +1024,7 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(stats.linked_by_original_filename, 1);
+        assert_eq!(report.stats.linked_by_original_filename, 1);
 
         let local_path: Option<String> = conn
             .query_row(
@@ -948,7 +1066,7 @@ mod tests {
         crate::commands::build::insert_batch(&mut conn, &mut batch).unwrap();
         crate::db::populate_fts(&conn).unwrap();
 
-        let stats = link_local_files(
+        let report = link_local_files(
             &mut conn,
             std::slice::from_ref(&file),
             LinkOptions {
@@ -960,8 +1078,12 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(stats.files_hashed_md5, 1);
-        assert_eq!(stats.linked_by_md5, 1);
+        assert_eq!(report.stats.files_hashed_md5, 1);
+        assert_eq!(report.stats.linked_by_md5, 1);
+
+        let entry = &report.entries[0];
+        assert_eq!(entry.matched_by.as_deref(), Some("md5"));
+        assert!(entry.reason.as_deref().unwrap().contains("matched md5"));
 
         let local_path: Option<String> = conn
             .query_row(
@@ -971,6 +1093,62 @@ mod tests {
             )
             .unwrap();
         assert!(local_path.is_some());
+
+        let _ = fs::remove_file(db_path);
+        let _ = fs::remove_file(file);
+        let _ = fs::remove_dir(dir);
+    }
+
+    #[test]
+    fn reports_ambiguous_candidates() {
+        let db_path = unique_path("link-local-ambiguous-db.sqlite3");
+        let dir = unique_path("link-local-ambiguous-dir");
+        fs::create_dir_all(&dir).unwrap();
+
+        let mut conn = Connection::open(&db_path).unwrap();
+        crate::db::prepare_database(&conn).unwrap();
+
+        let mut batch = vec![
+            sample_record(
+                "aa-1",
+                "Duplicate Filename One",
+                "Alice Author",
+                Some("same.pdf"),
+                Vec::new(),
+            ),
+            sample_record(
+                "aa-2",
+                "Duplicate Filename Two",
+                "Bob Writer",
+                Some("same.pdf"),
+                Vec::new(),
+            ),
+        ];
+        crate::commands::build::insert_batch(&mut conn, &mut batch).unwrap();
+        crate::db::populate_fts(&conn).unwrap();
+
+        let file = dir.join("same.pdf");
+        fs::write(&file, b"x").unwrap();
+
+        let report = link_local_files(
+            &mut conn,
+            std::slice::from_ref(&file),
+            LinkOptions {
+                replace_existing: false,
+                dry_run: true,
+                verbose: false,
+                hash_md5: false,
+            },
+        )
+        .unwrap();
+
+        assert_eq!(report.stats.ambiguous, 1);
+        let entry = &report.entries[0];
+        assert_eq!(entry.status, "ambiguous");
+        assert_eq!(entry.matched_by.as_deref(), Some("original_filename"));
+        assert_eq!(entry.candidates.len(), 2);
+        assert_eq!(entry.candidates[0].aa_id, "aa-1");
+        assert_eq!(entry.candidates[1].aa_id, "aa-2");
 
         let _ = fs::remove_file(db_path);
         let _ = fs::remove_file(file);

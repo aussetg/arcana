@@ -161,6 +161,16 @@
    --hash-md5
  ```
 
+ Link local files and emit a JSON report:
+
+ ```sh
+ cargo run -- link-local \
+   --db data/arcana.sqlite3 \
+   --scan ~/Books \
+   --dry-run \
+   --json
+ ```
+
  Optional expanded search:
 
  ```sh

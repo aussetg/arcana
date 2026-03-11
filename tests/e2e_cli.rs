@@ -139,6 +139,26 @@ fn build_search_and_link_local_cli_end_to_end() {
     let dry_stderr = String::from_utf8(dry_run.stderr).unwrap();
     assert!(dry_stderr.contains("would-link"));
 
+    let dry_json = run_ok(&[
+        "link-local",
+        "--db",
+        db.to_str().unwrap(),
+        "--scan",
+        books.to_str().unwrap(),
+        "--dry-run",
+        "--json",
+    ]);
+    let dry_json_value: Value = serde_json::from_str(&dry_json).unwrap();
+    assert_eq!(dry_json_value["dry_run"], true);
+    assert_eq!(dry_json_value["entries"][0]["status"], "would_link");
+    assert_eq!(dry_json_value["entries"][0]["matched_by"], "isbn");
+    assert!(
+        dry_json_value["entries"][0]["reason"]
+            .as_str()
+            .unwrap()
+            .contains("isbn13")
+    );
+
     let conn = Connection::open(&db).unwrap();
     let dry_local_path: Option<String> = conn
         .query_row(
