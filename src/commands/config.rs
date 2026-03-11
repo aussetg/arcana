@@ -25,6 +25,18 @@ pub struct ConfigInitArgs {
 }
 
 pub fn run(args: ConfigArgs) -> Result<()> {
+    let json = args.json;
+    match run_inner(args) {
+        Ok(()) => Ok(()),
+        Err(error) if json => {
+            crate::output::error::print_json("config", &error)?;
+            Err(crate::output::error::already_reported())
+        }
+        Err(error) => Err(error),
+    }
+}
+
+fn run_inner(args: ConfigArgs) -> Result<()> {
     match args.command {
         Some(ConfigCommand::Path) => {
             let path = crate::config::config_file_path()?;

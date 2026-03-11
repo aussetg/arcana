@@ -70,6 +70,19 @@ fn run_ok_with_env(args: &[&str], envs: &[(&str, &str)], remove_envs: &[&str]) -
     String::from_utf8(output.stdout).unwrap()
 }
 
+fn run_fail(args: &[&str]) -> (String, String) {
+    let output = Command::new(bin()).args(args).output().unwrap();
+    assert!(
+        !output.status.success(),
+        "command unexpectedly succeeded: {:?}",
+        args
+    );
+    (
+        String::from_utf8(output.stdout).unwrap(),
+        String::from_utf8(output.stderr).unwrap(),
+    )
+}
+
 #[test]
 fn build_search_and_link_local_cli_end_to_end() {
     let root = unique_temp_dir("portable");
@@ -414,6 +427,60 @@ fn download_cli_supports_json_output_for_verified_existing_files() {
         )
         .unwrap();
     assert_eq!(local_path.as_deref(), Some(existing_file.to_str().unwrap()));
+
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn download_json_errors_are_structured() {
+    let root = unique_temp_dir("download-json-error");
+    let shard = root.join("aarecords__0.json.gz");
+    let db = root.join("arcana.sqlite3");
+    let output_dir = root.join("downloads");
+    fs::create_dir_all(&output_dir).unwrap();
+
+    let md5_value = format!("{:x}", md5::compute(b"hello"));
+    let ndjson = format!(
+        "{{\"_source\":{{\"id\":\"aa-download-err-1\",\"search_only_fields\":{{\"search_title\":\"Download Fixture\",\"search_author\":\"Fixture Author\",\"search_year\":\"2024\",\"search_most_likely_language_code\":[\"en\"],\"search_extension\":\"pdf\"}},\"file_unified_data\":{{\"identifiers_unified\":{{\"md5\":[\"{md5_value}\"]}}}}}}}}\n"
+    );
+    let file = fs::File::create(&shard).unwrap();
+    let mut encoder = GzEncoder::new(file, Compression::default());
+    use std::io::Write;
+    encoder.write_all(ndjson.as_bytes()).unwrap();
+    encoder.finish().unwrap();
+
+    run_ok(&[
+        "build",
+        "--input",
+        root.to_str().unwrap(),
+        "--output",
+        db.to_str().unwrap(),
+        "--replace",
+    ]);
+
+    let existing_file = output_dir.join("aa-download-err-1.pdf");
+    fs::write(&existing_file, b"different bytes").unwrap();
+
+    let (_stdout, stderr) = run_fail(&[
+        "download",
+        "--db",
+        db.to_str().unwrap(),
+        "--md5",
+        &md5_value,
+        "--output-dir",
+        output_dir.to_str().unwrap(),
+        "--json",
+    ]);
+    let json: Value = serde_json::from_str(&stderr).unwrap();
+    assert_eq!(json["report_version"], 1);
+    assert_eq!(json["kind"], "error_report");
+    assert_eq!(json["command"], "download");
+    assert!(
+        json["message"]
+            .as_str()
+            .unwrap()
+            .contains("destination already exists but md5 does not match expected record")
+    );
 
     let _ = fs::remove_dir_all(root);
 }

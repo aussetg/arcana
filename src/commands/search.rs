@@ -80,6 +80,18 @@ pub struct SearchArgs {
 }
 
 pub fn run(args: SearchArgs) -> Result<()> {
+    let json = args.json;
+    match run_inner(args) {
+        Ok(()) => Ok(()),
+        Err(error) if json => {
+            crate::output::error::print_json("search", &error)?;
+            Err(crate::output::error::already_reported())
+        }
+        Err(error) => Err(error),
+    }
+}
+
+fn run_inner(args: SearchArgs) -> Result<()> {
     if args.limit == 0 {
         bail!("--limit must be greater than zero");
     }
@@ -191,6 +203,5 @@ pub fn run(args: SearchArgs) -> Result<()> {
     } else {
         crate::output::search::print_text(&report);
     }
-
     Ok(())
 }

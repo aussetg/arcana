@@ -132,6 +132,7 @@
 
  Interrupted downloads automatically resume from `.part` files when the server supports range requests.
  Download JSON output is versioned and includes structured request and outcome objects.
+ JSON-mode command failures now emit structured error reports on stderr.
 
  Show resolved config:
 
