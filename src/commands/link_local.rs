@@ -106,8 +106,8 @@ pub fn run(args: LinkLocalArgs) -> Result<()> {
         bail!("scan path is not a directory: {}", args.scan.display());
     }
 
-    let config = crate::config::load()?;
-    let db_path = args.db.clone().unwrap_or(config.db_path()?);
+    let config = crate::config::resolve()?;
+    let db_path = args.db.clone().unwrap_or(config.db_path());
 
     let mut conn = Connection::open(&db_path)
         .with_context(|| format!("failed to open {}", db_path.display()))?;

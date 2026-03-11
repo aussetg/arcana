@@ -66,9 +66,9 @@ pub fn run(args: DownloadArgs) -> Result<()> {
         args.isbn.as_deref(),
         args.doi.as_deref(),
     )?;
-    let config = crate::config::load()?;
-    let db_path = args.db.clone().unwrap_or(config.db_path()?);
-    let output_dir = args.output_dir.clone().unwrap_or(config.download_dir()?);
+    let config = crate::config::resolve()?;
+    let db_path = args.db.clone().unwrap_or(config.db_path());
+    let output_dir = args.output_dir.clone().unwrap_or(config.download_dir());
 
     let mut conn = Connection::open(&db_path)
         .with_context(|| format!("failed to open {}", db_path.display()))?;

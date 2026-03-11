@@ -5,29 +5,47 @@ use clap::Args;
 pub struct ConfigArgs {}
 
 pub fn run(_args: ConfigArgs) -> Result<()> {
-    let config = crate::config::load()?;
-    let config_file = crate::config::config_file_path()?;
-    let config_exists = config_file.exists();
-    let db_path = config.db_path()?;
-    let download_dir = config.download_dir()?;
-    let expand_cache_path = config
-        .expand_cache_path()
-        .unwrap_or_else(|| crate::search::expand::default_cache_path(&db_path));
-    let expand_model_path = config.expand_model_path();
-    let secret_env = config.secret_key_env().to_string();
-    let secret_is_set = std::env::var_os(&secret_env).is_some();
+    let config = crate::config::resolve()?;
 
-    println!("config_file: {}", config_file.display());
-    println!("config_exists: {}", config_exists);
-    println!("db_path: {}", db_path.display());
-    println!("download_dir: {}", download_dir.display());
-    println!("secret_key_env: {}", secret_env);
-    println!("secret_key_set: {}", secret_is_set);
-    println!("fast_download_api_url: {}", config.fast_download_api_url());
-    println!("expand_cache_path: {}", expand_cache_path.display());
-    println!("expand_command: {}", config.expand_command());
-    println!("expand_model_path: {}", expand_model_path.display());
-    println!("expand_timeout_secs: {}", config.expand_timeout_secs());
+    println!("config_file: {}", config.config_file.display());
+    println!("config_exists: {}", config.config_exists);
+    println!(
+        "db_path: {} [{}]",
+        config.db_path.value.display(),
+        config.db_path.source
+    );
+    println!(
+        "download_dir: {} [{}]",
+        config.download_dir.value.display(),
+        config.download_dir.source
+    );
+    println!(
+        "secret_key_env: {} [{}]",
+        config.secret_key_env.value, config.secret_key_env.source
+    );
+    println!("secret_key_set: {}", config.secret_key_is_set());
+    println!(
+        "fast_download_api_url: {} [{}]",
+        config.fast_download_api_url.value, config.fast_download_api_url.source
+    );
+    println!(
+        "expand_cache_path: {} [{}]",
+        config.expand_cache_path.value.display(),
+        config.expand_cache_path.source
+    );
+    println!(
+        "expand_command: {} [{}]",
+        config.expand_command.value, config.expand_command.source
+    );
+    println!(
+        "expand_model_path: {} [{}]",
+        config.expand_model_path.value.display(),
+        config.expand_model_path.source
+    );
+    println!(
+        "expand_timeout_secs: {} [{}]",
+        config.expand_timeout_secs.value, config.expand_timeout_secs.source
+    );
 
     Ok(())
 }

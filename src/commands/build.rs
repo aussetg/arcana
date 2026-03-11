@@ -42,8 +42,8 @@ pub fn run(args: BuildArgs) -> Result<()> {
         bail!("--batch-size must be greater than zero");
     }
 
-    let config = crate::config::load()?;
-    let output = args.output.unwrap_or(config.db_path()?).to_path_buf();
+    let config = crate::config::resolve()?;
+    let output = args.output.unwrap_or(config.db_path()).to_path_buf();
 
     prepare_output_path(&output, args.replace)?;
 

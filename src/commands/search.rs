@@ -94,8 +94,8 @@ pub fn run(args: SearchArgs) -> Result<()> {
         bail!("use only one of QUERY, --isbn, --doi, or --md5 at a time")
     }
 
-    let config = crate::config::load()?;
-    let db_path = args.db.clone().unwrap_or(config.db_path()?);
+    let config = crate::config::resolve()?;
+    let db_path = args.db.clone().unwrap_or(config.db_path());
 
     let conn = Connection::open(&db_path)
         .with_context(|| format!("failed to open {}", db_path.display()))?;
@@ -123,7 +123,7 @@ pub fn run(args: SearchArgs) -> Result<()> {
                 cache_path: args
                     .expand_cache
                     .clone()
-                    .or_else(|| config.expand_cache_path()),
+                    .or_else(|| Some(config.expand_cache_path())),
                 provider_command: args
                     .expand_command
                     .clone()
