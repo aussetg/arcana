@@ -1,20 +1,20 @@
 use std::collections::HashSet;
-use std::fs;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
-use std::thread;
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use anyhow::{Context, Result, bail};
-use rusqlite::{Connection, OptionalExtension, params};
+use rusqlite::Connection;
 use serde::{Deserialize, Serialize};
 
 use super::query::SearchFilters;
 
+mod cache;
+mod provider;
+
+pub use cache::default_cache_path;
+pub use provider::{ExpansionProvider, LlamaCliProvider, ProviderOutput};
+
 const DEFAULT_EXPAND_COMMAND: &str = "llama-cli";
 const DEFAULT_EXPAND_MODEL: &str = "~/Models/models--unsloth--Qwen3.5-0.8B-GGUF/snapshots/6ab461498e2023f6e3c1baea90a8f0fe38ab64d0/Qwen3.5-0.8B-UD-Q4_K_XL.gguf";
 const DEFAULT_TIMEOUT_SECS: u64 = 8;
-const PROMPT_VERSION: &str = "v1";
 
 #[derive(Debug, Clone)]
 pub struct ExpansionOptions {
@@ -97,130 +97,6 @@ pub struct ExpansionCandidate {
     pub confidence: Option<f64>,
 }
 
-#[derive(Debug, Clone)]
-pub struct ProviderOutput {
-    pub raw_response: String,
-    pub candidates: Vec<ExpansionCandidate>,
-}
-
-pub trait ExpansionProvider {
-    fn provider_name(&self) -> String;
-    fn generate(&self, normalized_query: &str, max_candidates: usize) -> Result<ProviderOutput>;
-}
-
-#[derive(Debug, Clone)]
-pub struct LlamaCliProvider {
-    command: String,
-    model_path: PathBuf,
-    timeout_secs: u64,
-}
-
-impl LlamaCliProvider {
-    pub fn new(command: String, model_path: PathBuf, timeout_secs: u64) -> Self {
-        Self {
-            command,
-            model_path,
-            timeout_secs,
-        }
-    }
-}
-
-impl ExpansionProvider for LlamaCliProvider {
-    fn provider_name(&self) -> String {
-        format!("{}:{}", self.command, self.model_path.display())
-    }
-
-    fn generate(&self, normalized_query: &str, max_candidates: usize) -> Result<ProviderOutput> {
-        let model_path = expand_tilde_path(&self.model_path);
-        if !model_path.exists() {
-            bail!("expansion model not found: {}", model_path.display());
-        }
-
-        let prompt = build_prompt(normalized_query, max_candidates);
-
-        let mut child = Command::new(&self.command)
-            .arg("-m")
-            .arg(&model_path)
-            .arg("-p")
-            .arg(prompt)
-            .arg("-n")
-            .arg("256")
-            .arg("--temp")
-            .arg("0")
-            .arg("--seed")
-            .arg("42")
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
-            .with_context(|| format!("failed to start {}", self.command))?;
-
-        let started = Instant::now();
-        loop {
-            if child.try_wait()?.is_some() {
-                let output = child.wait_with_output()?;
-                if !output.status.success() {
-                    bail!(
-                        "{} exited with status {}: {}",
-                        self.command,
-                        output.status,
-                        String::from_utf8_lossy(&output.stderr).trim()
-                    );
-                }
-
-                let stdout = String::from_utf8(output.stdout)
-                    .context("expansion provider output was not valid UTF-8")?;
-                let parsed = parse_provider_json(&stdout)?;
-
-                return Ok(ProviderOutput {
-                    raw_response: stdout,
-                    candidates: parsed.expansions,
-                });
-            }
-
-            if started.elapsed() >= Duration::from_secs(self.timeout_secs) {
-                let _ = child.kill();
-                let _ = child.wait_with_output();
-                bail!("{} timed out after {}s", self.command, self.timeout_secs);
-            }
-
-            thread::sleep(Duration::from_millis(25));
-        }
-    }
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct ProviderJson {
-    expansions: Vec<ExpansionCandidate>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct CachePayload {
-    accepted: Vec<AcceptedExpansion>,
-}
-
-#[derive(Debug, Clone)]
-struct CacheEntry {
-    accepted: Vec<AcceptedExpansion>,
-}
-
-#[derive(Debug, Clone)]
-struct SearchDbMetadata {
-    search_db_path: String,
-    user_version: i32,
-    record_count: i64,
-}
-
-pub fn default_cache_path(search_db_path: &Path) -> PathBuf {
-    let parent = search_db_path.parent().unwrap_or_else(|| Path::new("."));
-    let stem = search_db_path
-        .file_stem()
-        .and_then(|value| value.to_str())
-        .filter(|value| !value.is_empty())
-        .unwrap_or("arcana");
-
-    parent.join(format!("{stem}.expand-cache.sqlite3"))
-}
-
 pub fn expand_with_provider<P: ExpansionProvider>(
     conn: &Connection,
     search_db_path: &Path,
@@ -255,7 +131,7 @@ pub fn expand_with_provider<P: ExpansionProvider>(
         };
     }
 
-    let metadata = match load_search_db_metadata(conn, search_db_path) {
+    let metadata = match cache::load_search_db_metadata(conn, search_db_path) {
         Ok(metadata) => metadata,
         Err(error) => {
             debug.fallback_reason = Some(format!("failed to inspect search DB: {error:#}"));
@@ -266,7 +142,7 @@ pub fn expand_with_provider<P: ExpansionProvider>(
         }
     };
 
-    let cache_conn = match open_cache_connection(&cache_path) {
+    let cache_conn = match cache::open_cache_connection(&cache_path) {
         Ok(conn) => conn,
         Err(error) => {
             debug.fallback_reason = Some(format!("failed to open expansion cache: {error:#}"));
@@ -277,11 +153,11 @@ pub fn expand_with_provider<P: ExpansionProvider>(
         }
     };
 
-    match load_cache_entry(&cache_conn, &query_norm, &metadata) {
+    match cache::load_cache_entry(&cache_conn, &query_norm, &metadata) {
         Ok(Some(entry)) => {
             debug.cache_hit = true;
             debug.accepted = entry.accepted.clone();
-            let _ = touch_cache_entry(&cache_conn, &query_norm, &metadata);
+            let _ = cache::touch_cache_entry(&cache_conn, &query_norm, &metadata);
             return ExpansionOutcome {
                 accepted_queries: entry.accepted.into_iter().map(|item| item.text).collect(),
                 debug,
@@ -322,7 +198,7 @@ pub fn expand_with_provider<P: ExpansionProvider>(
     debug.accepted = accepted.clone();
     debug.rejected = rejected;
 
-    if let Err(error) = store_cache_entry(
+    if let Err(error) = cache::store_cache_entry(
         &cache_conn,
         &query_norm,
         &metadata,
@@ -497,233 +373,13 @@ fn looks_like_hash(query: &str) -> bool {
             .all(|character| character.is_ascii_hexdigit())
 }
 
-fn build_prompt(normalized_query: &str, max_candidates: usize) -> String {
-    format!(
-        "You generate lexical search query variants for a local metadata search engine.\n\
-Return JSON only. No markdown. No prose.\n\
-Schema: {{\"expansions\":[{{\"text\":\"...\",\"kind\":\"...\",\"confidence\":0.0}}]}}\n\
-Rules:\n\
-- Output at most {max_candidates} expansions.\n\
-- Each expansion must be a full alternative query for the whole input query.\n\
-- Prefer close lexical variants likely to appear literally in titles, subjects, descriptions, or publisher metadata.\n\
-- Do not output broad topic neighbors or brainstorming terms.\n\
-- Keep intent tight.\n\
-- If no safe expansion exists, return {{\"expansions\":[]}}.\n\
-Input query: {normalized_query:?}\n"
-    )
-}
-
-fn parse_provider_json(raw: &str) -> Result<ProviderJson> {
-    if let Ok(parsed) = serde_json::from_str::<ProviderJson>(raw.trim()) {
-        return Ok(parsed);
-    }
-
-    let trimmed = raw.trim();
-    let start = trimmed
-        .find('{')
-        .context("provider returned no JSON object")?;
-    let end = trimmed
-        .rfind('}')
-        .context("provider returned no JSON object")?;
-    let object = &trimmed[start..=end];
-    Ok(serde_json::from_str(object)?)
-}
-
-fn normalize_query(query: &str) -> String {
+pub(crate) fn normalize_query(query: &str) -> String {
     query
         .split_whitespace()
         .collect::<Vec<_>>()
         .join(" ")
         .trim()
         .to_ascii_lowercase()
-}
-
-fn load_search_db_metadata(conn: &Connection, search_db_path: &Path) -> Result<SearchDbMetadata> {
-    let user_version: i32 = conn.query_row("PRAGMA user_version", [], |row| row.get(0))?;
-    let record_count: i64 = conn.query_row("SELECT COUNT(*) FROM records", [], |row| row.get(0))?;
-
-    Ok(SearchDbMetadata {
-        search_db_path: search_db_path.display().to_string(),
-        user_version,
-        record_count,
-    })
-}
-
-fn open_cache_connection(path: &Path) -> Result<Connection> {
-    if let Some(parent) = path
-        .parent()
-        .filter(|parent| !parent.as_os_str().is_empty())
-    {
-        fs::create_dir_all(parent)
-            .with_context(|| format!("failed to create {}", parent.display()))?;
-    }
-
-    let conn =
-        Connection::open(path).with_context(|| format!("failed to open {}", path.display()))?;
-    conn.execute_batch(
-        "CREATE TABLE IF NOT EXISTS query_expansion_cache (
-            query_norm TEXT PRIMARY KEY,
-            search_db_path TEXT NOT NULL,
-            search_db_user_version INTEGER NOT NULL,
-            search_db_record_count INTEGER,
-            model_name TEXT NOT NULL,
-            prompt_version TEXT NOT NULL,
-            raw_response TEXT NOT NULL,
-            expansions_json TEXT NOT NULL,
-            created_at TEXT NOT NULL,
-            last_used_at TEXT NOT NULL,
-            use_count INTEGER NOT NULL DEFAULT 1
-        );",
-    )?;
-    Ok(conn)
-}
-
-fn load_cache_entry(
-    cache_conn: &Connection,
-    query_norm: &str,
-    metadata: &SearchDbMetadata,
-) -> Result<Option<CacheEntry>> {
-    let row = cache_conn
-        .query_row(
-            "SELECT raw_response, expansions_json, search_db_path, search_db_user_version, search_db_record_count
-             FROM query_expansion_cache
-             WHERE query_norm = ?1",
-            [query_norm],
-            |row| {
-                Ok((
-                    row.get::<_, String>(0)?,
-                    row.get::<_, String>(1)?,
-                    row.get::<_, String>(2)?,
-                    row.get::<_, i32>(3)?,
-                    row.get::<_, Option<i64>>(4)?,
-                ))
-            },
-        )
-        .optional()?;
-
-    let Some((
-        raw_response,
-        expansions_json,
-        cached_path,
-        cached_user_version,
-        cached_record_count,
-    )) = row
-    else {
-        return Ok(None);
-    };
-
-    if cached_path != metadata.search_db_path
-        || cached_user_version != metadata.user_version
-        || cached_record_count != Some(metadata.record_count)
-    {
-        return Ok(None);
-    }
-
-    let payload: CachePayload = serde_json::from_str(&expansions_json)?;
-
-    let _ = raw_response;
-
-    Ok(Some(CacheEntry {
-        accepted: payload.accepted,
-    }))
-}
-
-fn touch_cache_entry(
-    cache_conn: &Connection,
-    query_norm: &str,
-    metadata: &SearchDbMetadata,
-) -> Result<()> {
-    cache_conn.execute(
-        "UPDATE query_expansion_cache
-         SET last_used_at = ?2,
-             use_count = use_count + 1,
-             search_db_path = ?3,
-             search_db_user_version = ?4,
-             search_db_record_count = ?5
-         WHERE query_norm = ?1",
-        params![
-            query_norm,
-            now_string(),
-            metadata.search_db_path,
-            metadata.user_version,
-            metadata.record_count,
-        ],
-    )?;
-    Ok(())
-}
-
-fn store_cache_entry(
-    cache_conn: &Connection,
-    query_norm: &str,
-    metadata: &SearchDbMetadata,
-    model_name: &str,
-    raw_response: String,
-    accepted: &[AcceptedExpansion],
-) -> Result<()> {
-    let payload = serde_json::to_string(&CachePayload {
-        accepted: accepted.to_vec(),
-    })?;
-    let now = now_string();
-
-    cache_conn.execute(
-        "INSERT INTO query_expansion_cache (
-            query_norm,
-            search_db_path,
-            search_db_user_version,
-            search_db_record_count,
-            model_name,
-            prompt_version,
-            raw_response,
-            expansions_json,
-            created_at,
-            last_used_at,
-            use_count
-        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, 1)
-        ON CONFLICT(query_norm) DO UPDATE SET
-            search_db_path = excluded.search_db_path,
-            search_db_user_version = excluded.search_db_user_version,
-            search_db_record_count = excluded.search_db_record_count,
-            model_name = excluded.model_name,
-            prompt_version = excluded.prompt_version,
-            raw_response = excluded.raw_response,
-            expansions_json = excluded.expansions_json,
-            last_used_at = excluded.last_used_at,
-            use_count = query_expansion_cache.use_count + 1",
-        params![
-            query_norm,
-            metadata.search_db_path,
-            metadata.user_version,
-            metadata.record_count,
-            model_name,
-            PROMPT_VERSION,
-            raw_response,
-            payload,
-            now,
-            now,
-        ],
-    )?;
-
-    Ok(())
-}
-
-fn now_string() -> String {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs()
-        .to_string()
-}
-
-fn expand_tilde_path(path: &Path) -> PathBuf {
-    let path_text = path.to_string_lossy();
-    if !path_text.starts_with("~/") {
-        return path.to_path_buf();
-    }
-
-    match std::env::var_os("HOME") {
-        Some(home) => PathBuf::from(home).join(&path_text[2..]),
-        None => path.to_path_buf(),
-    }
 }
 
 #[cfg(test)]
@@ -738,7 +394,7 @@ mod tests {
     use crate::model::{ExtractedRecord, FlatRecord};
 
     use super::{
-        AcceptedExpansion, ExpansionCandidate, ExpansionOptions, ExpansionProvider,
+        AcceptedExpansion, ExpansionCandidate, ExpansionOptions, ExpansionProvider, ProviderOutput,
         expand_with_provider, normalize_query,
     };
 
@@ -758,14 +414,14 @@ mod tests {
             &self,
             _normalized_query: &str,
             _max_candidates: usize,
-        ) -> Result<super::ProviderOutput> {
+        ) -> Result<ProviderOutput> {
             *self.call_count.lock().unwrap() += 1;
 
             if self.fail {
                 anyhow::bail!("mock failure");
             }
 
-            Ok(super::ProviderOutput {
+            Ok(ProviderOutput {
                 raw_response: "{\"expansions\":[]}".into(),
                 candidates: self.candidates.clone(),
             })
