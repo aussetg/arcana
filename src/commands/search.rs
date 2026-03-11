@@ -4,6 +4,8 @@ use anyhow::{Context, Result, bail};
 use clap::Args;
 use rusqlite::Connection;
 
+use crate::output::search::SearchReport;
+
 #[derive(Debug, Args)]
 pub struct SearchArgs {
     #[arg(
@@ -106,7 +108,7 @@ pub fn run(args: SearchArgs) -> Result<()> {
         limit: args.limit,
     };
 
-    let results = if let Some(query) = args.query {
+    let (results, expansion_debug) = if let Some(query) = args.query {
         if !crate::search::has_fts_rows(&conn)? {
             bail!("database has no populated FTS index; rebuild with `build --input ...`")
         }
@@ -136,102 +138,30 @@ pub fn run(args: SearchArgs) -> Result<()> {
             },
         )?;
 
-        if let Some(report) = output.expansion.as_ref() {
-            print_expansion_debug(report);
-        }
-
-        output.results
+        (output.results, output.expansion)
     } else if let Some(isbn) = args.isbn {
-        crate::search::search_exact(&conn, &["isbn10", "isbn13"], &isbn, &filters)?
+        (
+            crate::search::search_exact(&conn, &["isbn10", "isbn13"], &isbn, &filters)?,
+            None,
+        )
     } else if let Some(doi) = args.doi {
-        crate::search::search_exact(&conn, &["doi"], &doi, &filters)?
+        (
+            crate::search::search_exact(&conn, &["doi"], &doi, &filters)?,
+            None,
+        )
     } else if let Some(md5) = args.md5 {
-        crate::search::search_exact(&conn, &["md5"], &md5, &filters)?
+        (
+            crate::search::search_exact(&conn, &["md5"], &md5, &filters)?,
+            None,
+        )
     } else {
         bail!("unreachable search mode")
     };
 
-    if results.is_empty() {
-        println!("no results");
-        return Ok(());
-    }
-
-    for (index, result) in results.iter().enumerate() {
-        print_result(index + 1, result);
-    }
+    crate::output::search::print_text(&SearchReport {
+        results,
+        expansion_debug,
+    });
 
     Ok(())
-}
-
-fn print_expansion_debug(report: &crate::search::expand::ExpansionDebugReport) {
-    eprintln!("[expand] query: {}", report.query_norm);
-    eprintln!("[expand] attempted: {}", report.attempted);
-    eprintln!("[expand] cache: {}", report.cache_path.display());
-    eprintln!("[expand] cache-hit: {}", report.cache_hit);
-
-    if let Some(provider) = &report.provider {
-        eprintln!("[expand] provider: {provider}");
-    }
-
-    for accepted in &report.accepted {
-        eprintln!(
-            "[expand] accepted: {:?} kind={:?} confidence={:?} hits={}",
-            accepted.text, accepted.kind, accepted.confidence, accepted.corpus_hits
-        );
-    }
-
-    for rejected in &report.rejected {
-        eprintln!(
-            "[expand] rejected: {:?} ({})",
-            rejected.text, rejected.reason
-        );
-    }
-
-    if let Some(reason) = &report.fallback_reason {
-        eprintln!("[expand] fallback: {reason}");
-    }
-}
-
-fn print_result(index: usize, result: &crate::model::SearchResult) {
-    println!(
-        "{index}. {}",
-        result.title.as_deref().unwrap_or("(untitled)")
-    );
-
-    let mut meta = Vec::new();
-    if let Some(author) = &result.author {
-        meta.push(author.clone());
-    }
-    if let Some(year) = result.year {
-        meta.push(year.to_string());
-    }
-    if let Some(language) = &result.language {
-        meta.push(language.clone());
-    }
-    if let Some(extension) = &result.extension {
-        meta.push(extension.clone());
-    }
-    if !meta.is_empty() {
-        println!("   {}", meta.join(" · "));
-    }
-
-    println!("   aa_id: {}", result.aa_id);
-
-    if let Some(source) = &result.primary_source {
-        println!("   source: {source}");
-    }
-
-    if let Some(rank) = result.score_base_rank {
-        println!("   base-rank: {rank}");
-    }
-
-    if let Some(score) = result.bm25_score {
-        println!("   bm25: {score:.6}");
-    }
-
-    if let Some(path) = &result.local_path {
-        println!("   local: {path}");
-    }
-
-    println!();
 }
