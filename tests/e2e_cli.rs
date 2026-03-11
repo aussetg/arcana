@@ -289,6 +289,17 @@ fn config_cli_supports_path_init_and_json() {
     let expected_path = home.join(".config/arcana/config.yaml");
     assert_eq!(path_out.trim(), expected_path.display().to_string());
 
+    let path_json_out = run_ok_with_env(
+        &["config", "--json", "path"],
+        &[("HOME", home.to_str().unwrap())],
+        &["XDG_CONFIG_HOME", "XDG_DOWNLOAD_DIR"],
+    );
+    let path_json: Value = serde_json::from_str(&path_json_out).unwrap();
+    assert_eq!(path_json["report_version"], 1);
+    assert_eq!(path_json["kind"], "config_path_report");
+    assert_eq!(path_json["path"], expected_path.display().to_string());
+    assert_eq!(path_json["exists"], false);
+
     let init_out = run_ok_with_env(
         &["config", "init"],
         &[("HOME", home.to_str().unwrap())],
@@ -316,6 +327,18 @@ fn config_cli_supports_path_init_and_json() {
         json["values"]["secret_key_env"]["value"],
         "ANNAS_ARCHIVE_SECRET_KEY"
     );
+
+    let init_json_out = run_ok_with_env(
+        &["config", "--json", "init", "--force"],
+        &[("HOME", home.to_str().unwrap())],
+        &["XDG_CONFIG_HOME", "XDG_DOWNLOAD_DIR"],
+    );
+    let init_json: Value = serde_json::from_str(&init_json_out).unwrap();
+    assert_eq!(init_json["report_version"], 1);
+    assert_eq!(init_json["kind"], "config_init_report");
+    assert_eq!(init_json["path"], expected_path.display().to_string());
+    assert_eq!(init_json["created"], true);
+    assert_eq!(init_json["overwritten"], true);
 
     let duplicate_init = Command::new(bin())
         .args(["config", "init"])

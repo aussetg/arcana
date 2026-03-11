@@ -27,18 +27,15 @@ pub struct ConfigInitArgs {
 pub fn run(args: ConfigArgs) -> Result<()> {
     match args.command {
         Some(ConfigCommand::Path) => {
+            let path = crate::config::config_file_path()?;
             if args.json {
-                bail!("--json is not supported with `config path`")
+                crate::output::config::print_json_path(&path, path.exists())
+            } else {
+                println!("{}", path.display());
+                Ok(())
             }
-            println!("{}", crate::config::config_file_path()?.display());
-            Ok(())
         }
-        Some(ConfigCommand::Init(init_args)) => {
-            if args.json {
-                bail!("--json is not supported with `config init`")
-            }
-            run_init(init_args)
-        }
+        Some(ConfigCommand::Init(init_args)) => run_init(init_args, args.json),
         None => {
             let config = crate::config::resolve()?;
             if args.json {
@@ -50,8 +47,9 @@ pub fn run(args: ConfigArgs) -> Result<()> {
     }
 }
 
-fn run_init(args: ConfigInitArgs) -> Result<()> {
+fn run_init(args: ConfigInitArgs, json: bool) -> Result<()> {
     let path = crate::config::config_file_path()?;
+    let overwritten = path.exists();
     if path.exists() && !args.force {
         bail!(
             "config file already exists: {} (pass --force to overwrite)",
@@ -64,6 +62,10 @@ fn run_init(args: ConfigInitArgs) -> Result<()> {
     }
 
     crate::config::save(&path, &crate::config::starter()?)?;
-    println!("wrote config: {}", path.display());
-    Ok(())
+    if json {
+        crate::output::config::print_json_init(&path, overwritten)
+    } else {
+        println!("wrote config: {}", path.display());
+        Ok(())
+    }
 }

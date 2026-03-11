@@ -55,6 +55,33 @@ pub fn print_json(config: &ResolvedConfig) -> Result<()> {
     Ok(())
 }
 
+pub fn print_json_path(path: &std::path::Path, exists: bool) -> Result<()> {
+    println!(
+        "{}",
+        serde_json::to_string_pretty(&ConfigPathReport {
+            report_version: 1,
+            kind: "config_path_report",
+            path: path.display().to_string(),
+            exists,
+        })?
+    );
+    Ok(())
+}
+
+pub fn print_json_init(path: &std::path::Path, overwritten: bool) -> Result<()> {
+    println!(
+        "{}",
+        serde_json::to_string_pretty(&ConfigInitReport {
+            report_version: 1,
+            kind: "config_init_report",
+            path: path.display().to_string(),
+            created: true,
+            overwritten,
+        })?
+    );
+    Ok(())
+}
+
 #[derive(Debug, Serialize)]
 struct ConfigReport {
     report_version: u32,
@@ -81,6 +108,23 @@ struct ConfigValues {
 struct ConfigValue<T> {
     value: T,
     source: crate::config::ValueSource,
+}
+
+#[derive(Debug, Serialize)]
+struct ConfigPathReport {
+    report_version: u32,
+    kind: &'static str,
+    path: String,
+    exists: bool,
+}
+
+#[derive(Debug, Serialize)]
+struct ConfigInitReport {
+    report_version: u32,
+    kind: &'static str,
+    path: String,
+    created: bool,
+    overwritten: bool,
 }
 
 impl From<&ResolvedConfig> for ConfigReport {

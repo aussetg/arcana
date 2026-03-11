@@ -153,10 +153,22 @@
  cargo run -- config path
  ```
 
+ Show config file path as JSON:
+
+ ```sh
+ cargo run -- config --json path
+ ```
+
  Initialize a starter config file:
 
  ```sh
  cargo run -- config init
+ ```
+
+ Initialize a starter config file as JSON:
+
+ ```sh
+ cargo run -- config --json init --force
  ```
 
  Local file linkage:
