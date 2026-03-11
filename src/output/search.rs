@@ -5,13 +5,30 @@ use serde::Serialize;
 
 #[derive(Debug, Clone, Serialize)]
 pub struct SearchReport {
-    pub query_kind: String,
-    pub query: String,
-    pub filters: SearchReportFilters,
+    pub report_version: u32,
+    pub kind: &'static str,
+    pub request: SearchRequest,
     pub result_count: usize,
     pub results: Vec<SearchResult>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub expansion_debug: Option<ExpansionDebugReport>,
+    pub expansion: Option<ExpansionDebugReport>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct SearchRequest {
+    pub mode: SearchQueryMode,
+    pub value: String,
+    pub filters: SearchReportFilters,
+    pub expand_requested: bool,
+}
+
+#[derive(Debug, Clone, Copy, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SearchQueryMode {
+    Keyword,
+    Isbn,
+    Doi,
+    Md5,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -24,30 +41,36 @@ pub struct SearchReportFilters {
 
 impl SearchReport {
     pub fn new(
-        query_kind: impl Into<String>,
+        mode: SearchQueryMode,
         query: impl Into<String>,
         filters: &SearchFilters,
+        expand_requested: bool,
         results: Vec<SearchResult>,
-        expansion_debug: Option<ExpansionDebugReport>,
+        expansion: Option<ExpansionDebugReport>,
     ) -> Self {
         Self {
-            query_kind: query_kind.into(),
-            query: query.into(),
-            filters: SearchReportFilters {
-                language: filters.language.clone(),
-                extension: filters.extension.clone(),
-                year: filters.year,
-                limit: filters.limit,
+            report_version: 1,
+            kind: "search_report",
+            request: SearchRequest {
+                mode,
+                value: query.into(),
+                filters: SearchReportFilters {
+                    language: filters.language.clone(),
+                    extension: filters.extension.clone(),
+                    year: filters.year,
+                    limit: filters.limit,
+                },
+                expand_requested,
             },
             result_count: results.len(),
             results,
-            expansion_debug,
+            expansion,
         }
     }
 }
 
 pub fn print_text(report: &SearchReport) {
-    if let Some(expansion_debug) = report.expansion_debug.as_ref() {
+    if let Some(expansion_debug) = report.expansion.as_ref() {
         print_expansion_debug(expansion_debug);
     }
 

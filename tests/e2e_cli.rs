@@ -105,10 +105,25 @@ fn build_search_and_link_local_cli_end_to_end() {
         "large language models",
     ]);
     let search_value: Value = serde_json::from_str(&search_json).unwrap();
-    assert_eq!(search_value["query_kind"], "keyword");
-    assert_eq!(search_value["query"], "large language models");
+    assert_eq!(search_value["report_version"], 1);
+    assert_eq!(search_value["kind"], "search_report");
+    assert_eq!(search_value["request"]["mode"], "keyword");
+    assert_eq!(search_value["request"]["value"], "large language models");
+    assert_eq!(search_value["request"]["expand_requested"], false);
     assert_eq!(search_value["result_count"], 1);
     assert_eq!(search_value["results"][0]["aa_id"], "aa-llm-1");
+
+    let exact_json = run_ok(&[
+        "search",
+        "--db",
+        db.to_str().unwrap(),
+        "--json",
+        "--isbn",
+        "9789401771993",
+    ]);
+    let exact_value: Value = serde_json::from_str(&exact_json).unwrap();
+    assert_eq!(exact_value["request"]["mode"], "isbn");
+    assert_eq!(exact_value["request"]["value"], "9789401771993");
 
     let exact_out = run_ok(&[
         "search",

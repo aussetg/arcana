@@ -4,7 +4,7 @@ use anyhow::{Context, Result, bail};
 use clap::Args;
 use rusqlite::Connection;
 
-use crate::output::search::SearchReport;
+use crate::output::search::{SearchQueryMode, SearchReport};
 
 #[derive(Debug, Args)]
 pub struct SearchArgs {
@@ -111,63 +111,80 @@ pub fn run(args: SearchArgs) -> Result<()> {
         limit: args.limit,
     };
 
-    let (query_kind, query_text, results, expansion_debug) = if let Some(query) = args.query {
-        if !crate::search::has_fts_rows(&conn)? {
-            bail!("database has no populated FTS index; rebuild with `build --input ...`")
-        }
-        let output = crate::search::search_keyword_with_expansion(
-            &conn,
-            &db_path,
-            &query,
-            &filters,
-            &crate::search::expand::ExpansionOptions {
-                enabled: args.expand,
-                debug: args.expand_debug,
-                cache_path: args
-                    .expand_cache
-                    .clone()
-                    .or_else(|| Some(config.expand_cache_path())),
-                provider_command: args
-                    .expand_command
-                    .clone()
-                    .unwrap_or_else(|| config.expand_command().to_string()),
-                model_path: Some(
-                    args.expand_model
+    let (query_mode, query_text, expand_requested, results, expansion_debug) =
+        if let Some(query) = args.query {
+            if !crate::search::has_fts_rows(&conn)? {
+                bail!("database has no populated FTS index; rebuild with `build --input ...`")
+            }
+            let output = crate::search::search_keyword_with_expansion(
+                &conn,
+                &db_path,
+                &query,
+                &filters,
+                &crate::search::expand::ExpansionOptions {
+                    enabled: args.expand,
+                    debug: args.expand_debug,
+                    cache_path: args
+                        .expand_cache
                         .clone()
-                        .unwrap_or_else(|| config.expand_model_path()),
-                ),
-                timeout_secs: args.expand_timeout.unwrap_or(config.expand_timeout_secs()),
-                max_candidates: 4,
-            },
-        )?;
+                        .or_else(|| Some(config.expand_cache_path())),
+                    provider_command: args
+                        .expand_command
+                        .clone()
+                        .unwrap_or_else(|| config.expand_command().to_string()),
+                    model_path: Some(
+                        args.expand_model
+                            .clone()
+                            .unwrap_or_else(|| config.expand_model_path()),
+                    ),
+                    timeout_secs: args.expand_timeout.unwrap_or(config.expand_timeout_secs()),
+                    max_candidates: 4,
+                },
+            )?;
 
-        ("keyword", query, output.results, output.expansion)
-    } else if let Some(isbn) = args.isbn {
-        (
-            "isbn",
-            isbn.clone(),
-            crate::search::search_exact(&conn, &["isbn10", "isbn13"], &isbn, &filters)?,
-            None,
-        )
-    } else if let Some(doi) = args.doi {
-        (
-            "doi",
-            doi.clone(),
-            crate::search::search_exact(&conn, &["doi"], &doi, &filters)?,
-            None,
-        )
-    } else if let Some(md5) = args.md5 {
-        (
-            "md5",
-            md5.clone(),
-            crate::search::search_exact(&conn, &["md5"], &md5, &filters)?,
-            None,
-        )
-    } else {
-        bail!("unreachable search mode")
-    };
+            (
+                SearchQueryMode::Keyword,
+                query,
+                args.expand,
+                output.results,
+                output.expansion,
+            )
+        } else if let Some(isbn) = args.isbn {
+            (
+                SearchQueryMode::Isbn,
+                isbn.clone(),
+                false,
+                crate::search::search_exact(&conn, &["isbn10", "isbn13"], &isbn, &filters)?,
+                None,
+            )
+        } else if let Some(doi) = args.doi {
+            (
+                SearchQueryMode::Doi,
+                doi.clone(),
+                false,
+                crate::search::search_exact(&conn, &["doi"], &doi, &filters)?,
+                None,
+            )
+        } else if let Some(md5) = args.md5 {
+            (
+                SearchQueryMode::Md5,
+                md5.clone(),
+                false,
+                crate::search::search_exact(&conn, &["md5"], &md5, &filters)?,
+                None,
+            )
+        } else {
+            bail!("unreachable search mode")
+        };
 
-    let report = SearchReport::new(query_kind, query_text, &filters, results, expansion_debug);
+    let report = SearchReport::new(
+        query_mode,
+        query_text,
+        &filters,
+        expand_requested,
+        results,
+        expansion_debug,
+    );
 
     if args.json {
         crate::output::search::print_json(&report)?;

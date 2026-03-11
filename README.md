@@ -92,6 +92,8 @@
  cargo run -- search --db data/arcana.sqlite3 --json "large language models"
  ```
 
+ JSON output is versioned and includes a structured `request` object for agent-friendly use.
+
  Exact lookup:
 
  ```sh
