@@ -1,6 +1,7 @@
 mod file_info;
 mod matcher;
 mod scan;
+mod service;
 
 pub use file_info::{
     LocalFileInfo, build_local_file_info, compute_file_md5, extract_isbn_candidates,
@@ -11,3 +12,4 @@ pub use matcher::{
     find_local_match,
 };
 pub use scan::discover_local_files;
+pub use service::{LinkOptions, link_local_files};
