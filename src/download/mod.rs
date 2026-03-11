@@ -221,7 +221,12 @@ mod tests {
                 .find(|header| header.field.as_str().as_str().eq_ignore_ascii_case("Range"))
                 .unwrap();
             assert_eq!(range_header.value.as_str(), "bytes=6-");
-            let response = Response::from_data(b"world".to_vec()).with_status_code(206);
+            let response = Response::from_data(b"world".to_vec())
+                .with_status_code(206)
+                .with_header(
+                    tiny_http::Header::from_bytes(&b"Content-Range"[..], &b"bytes 6-10/11"[..])
+                        .unwrap(),
+                );
             request.respond(response).unwrap();
             tx.send(()).unwrap();
         });
@@ -244,6 +249,58 @@ mod tests {
         );
         assert_eq!(fs::read(&destination).unwrap(), b"hello world");
         assert!(!partial.exists());
+        rx.recv().unwrap();
+        handle.join().unwrap();
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn rejects_mismatched_partial_content_range() {
+        let root = std::env::temp_dir().join(format!(
+            "arcana-download-bad-resume-{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&root).unwrap();
+        let destination = root.join("book.pdf");
+        let partial = root.join("book.pdf.part");
+        fs::write(&partial, b"hello ").unwrap();
+
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        drop(listener);
+
+        let server = Server::http(address).unwrap();
+        let (tx, rx) = mpsc::channel();
+
+        let handle = thread::spawn(move || {
+            let request = server.recv().unwrap();
+            let response = Response::from_data(b"hello world".to_vec())
+                .with_status_code(206)
+                .with_header(
+                    tiny_http::Header::from_bytes(&b"Content-Range"[..], &b"bytes 0-10/11"[..])
+                        .unwrap(),
+                );
+            request.respond(response).unwrap();
+            tx.send(()).unwrap();
+        });
+
+        let client = Client::builder().build().unwrap();
+        let error = download_to_path(
+            &client,
+            &format!("http://{address}/file.pdf"),
+            &destination,
+            false,
+        )
+        .unwrap_err()
+        .to_string();
+
+        assert!(error.contains("resumed from byte 0 but local partial is 6 bytes"));
+        assert_eq!(fs::read(&partial).unwrap(), b"hello ");
+        assert!(!destination.exists());
+
         rx.recv().unwrap();
         handle.join().unwrap();
         let _ = fs::remove_dir_all(root);

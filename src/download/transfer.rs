@@ -8,7 +8,7 @@ use anyhow::{Context, Result, bail};
 use md5::Context as Md5Context;
 use reqwest::StatusCode;
 use reqwest::blocking::Client;
-use reqwest::header::RANGE;
+use reqwest::header::{CONTENT_RANGE, RANGE};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct DownloadTransferResult {
@@ -86,6 +86,13 @@ pub fn download_to_path(
             }
         }
         StatusCode::PARTIAL_CONTENT => {
+            if existing_partial_len == 0 {
+                bail!(
+                    "download server returned 206 Partial Content without a resumable partial file"
+                );
+            }
+
+            validate_partial_content_response(&response, existing_partial_len)?;
             write_response_to_partial(response, &partial_path, existing_partial_len > 0)?;
             DownloadTransferResult {
                 resumed_partial: existing_partial_len > 0,
@@ -120,6 +127,41 @@ pub fn download_to_path(
     })?;
 
     Ok(transfer)
+}
+
+fn validate_partial_content_response(
+    response: &reqwest::blocking::Response,
+    existing_partial_len: u64,
+) -> Result<()> {
+    let content_range = response
+        .headers()
+        .get(CONTENT_RANGE)
+        .context("download server returned 206 without Content-Range")?
+        .to_str()
+        .context("download server returned non-UTF-8 Content-Range")?;
+
+    let range = content_range
+        .strip_prefix("bytes ")
+        .context("download server returned malformed Content-Range")?;
+    let (byte_range, _total) = range
+        .split_once('/')
+        .context("download server returned malformed Content-Range")?;
+    let (start, _end) = byte_range
+        .split_once('-')
+        .context("download server returned malformed Content-Range")?;
+    let start: u64 = start
+        .parse()
+        .context("download server returned malformed Content-Range start")?;
+
+    if start != existing_partial_len {
+        bail!(
+            "download server resumed from byte {} but local partial is {} bytes",
+            start,
+            existing_partial_len
+        );
+    }
+
+    Ok(())
 }
 
 fn partial_download_path(destination: &Path) -> PathBuf {
