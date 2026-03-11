@@ -105,6 +105,7 @@ pub fn expand_with_provider<P: ExpansionProvider>(
     options: &ExpansionOptions,
     provider: &P,
 ) -> ExpansionOutcome {
+    let provider_name = provider.provider_name();
     let cache_path = options
         .cache_path
         .clone()
@@ -115,7 +116,7 @@ pub fn expand_with_provider<P: ExpansionProvider>(
         attempted: true,
         cache_path: cache_path.clone(),
         cache_hit: false,
-        provider: Some(provider.provider_name()),
+        provider: Some(provider_name.clone()),
         query_norm: query_norm.clone(),
         accepted: Vec::new(),
         rejected: Vec::new(),
@@ -153,7 +154,7 @@ pub fn expand_with_provider<P: ExpansionProvider>(
         }
     };
 
-    match cache::load_cache_entry(&cache_conn, &query_norm, &metadata) {
+    match cache::load_cache_entry(&cache_conn, &query_norm, &metadata, &provider_name, filters) {
         Ok(Some(entry)) => {
             debug.cache_hit = true;
             debug.accepted = entry.accepted.clone();
@@ -202,8 +203,9 @@ pub fn expand_with_provider<P: ExpansionProvider>(
         &cache_conn,
         &query_norm,
         &metadata,
-        &provider.provider_name(),
+        &provider_name,
         provider_output.raw_response,
+        filters,
         &accepted,
     ) {
         debug.fallback_reason = Some(format!("failed to store expansion cache: {error:#}"));
@@ -400,6 +402,7 @@ mod tests {
 
     #[derive(Clone)]
     struct MockProvider {
+        name: String,
         call_count: Arc<Mutex<usize>>,
         candidates: Vec<ExpansionCandidate>,
         fail: bool,
@@ -407,7 +410,7 @@ mod tests {
 
     impl ExpansionProvider for MockProvider {
         fn provider_name(&self) -> String {
-            "mock-provider".into()
+            self.name.clone()
         }
 
         fn generate(
@@ -490,6 +493,7 @@ mod tests {
 
         let calls = Arc::new(Mutex::new(0usize));
         let provider = MockProvider {
+            name: "mock-provider".into(),
             call_count: calls.clone(),
             candidates: vec![ExpansionCandidate {
                 text: "large language model interpretability".into(),
@@ -562,6 +566,7 @@ mod tests {
         crate::db::prepare_database(&conn).unwrap();
 
         let provider = MockProvider {
+            name: "mock-provider".into(),
             call_count: Arc::new(Mutex::new(0)),
             candidates: Vec::new(),
             fail: true,
@@ -599,6 +604,164 @@ mod tests {
                 .unwrap()
                 .contains("expansion provider failed")
         );
+
+        let _ = std::fs::remove_file(search_db_path);
+        let _ = std::fs::remove_file(cache_path);
+    }
+
+    #[test]
+    fn cache_key_includes_provider_identity() {
+        let search_db_path = unique_path("search-db-provider");
+        let cache_path = unique_path("expand-cache-provider");
+        let mut conn = Connection::open(&search_db_path).unwrap();
+        crate::db::prepare_database(&conn).unwrap();
+
+        let mut batch = vec![sample_record(
+            "aa-1",
+            "Large Language Model Interpretability",
+        )];
+        crate::commands::build::insert_batch(&mut conn, &mut batch).unwrap();
+        crate::db::populate_fts(&conn).unwrap();
+
+        let filters = crate::search::query::SearchFilters {
+            language: Some("en".into()),
+            extension: Some("pdf".into()),
+            year: Some(2024),
+            limit: 10,
+        };
+        let options = ExpansionOptions {
+            enabled: true,
+            debug: true,
+            cache_path: Some(cache_path.clone()),
+            provider_command: "mock".into(),
+            model_path: None,
+            timeout_secs: 1,
+            max_candidates: 4,
+        };
+
+        let calls_a = Arc::new(Mutex::new(0usize));
+        let provider_a = MockProvider {
+            name: "mock-provider-a".into(),
+            call_count: calls_a.clone(),
+            candidates: vec![ExpansionCandidate {
+                text: "large language model interpretability".into(),
+                kind: Some("provider_a".into()),
+                confidence: Some(0.9),
+            }],
+            fail: false,
+        };
+        let first = expand_with_provider(
+            &conn,
+            &search_db_path,
+            "llm interpretability",
+            &filters,
+            &options,
+            &provider_a,
+        );
+        assert!(!first.debug.cache_hit);
+
+        let calls_b = Arc::new(Mutex::new(0usize));
+        let provider_b = MockProvider {
+            name: "mock-provider-b".into(),
+            call_count: calls_b.clone(),
+            candidates: vec![ExpansionCandidate {
+                text: "large language model interpretability".into(),
+                kind: Some("provider_b".into()),
+                confidence: Some(0.8),
+            }],
+            fail: false,
+        };
+        let second = expand_with_provider(
+            &conn,
+            &search_db_path,
+            "llm interpretability",
+            &filters,
+            &options,
+            &provider_b,
+        );
+        assert!(!second.debug.cache_hit);
+        assert_eq!(*calls_a.lock().unwrap(), 1);
+        assert_eq!(*calls_b.lock().unwrap(), 1);
+        assert_eq!(second.debug.accepted.len(), 1);
+        assert_eq!(second.debug.accepted[0].kind.as_deref(), Some("provider_b"));
+
+        let _ = std::fs::remove_file(search_db_path);
+        let _ = std::fs::remove_file(cache_path);
+    }
+
+    #[test]
+    fn cache_key_includes_search_filters() {
+        let search_db_path = unique_path("search-db-filters");
+        let cache_path = unique_path("expand-cache-filters");
+        let mut conn = Connection::open(&search_db_path).unwrap();
+        crate::db::prepare_database(&conn).unwrap();
+
+        let mut batch = vec![sample_record(
+            "aa-1",
+            "Large Language Model Interpretability",
+        )];
+        crate::commands::build::insert_batch(&mut conn, &mut batch).unwrap();
+        crate::db::populate_fts(&conn).unwrap();
+
+        let calls = Arc::new(Mutex::new(0usize));
+        let provider = MockProvider {
+            name: "mock-provider".into(),
+            call_count: calls.clone(),
+            candidates: vec![ExpansionCandidate {
+                text: "large language model interpretability".into(),
+                kind: Some("abbreviation_expansion".into()),
+                confidence: Some(0.95),
+            }],
+            fail: false,
+        };
+
+        let options = ExpansionOptions {
+            enabled: true,
+            debug: true,
+            cache_path: Some(cache_path.clone()),
+            provider_command: "mock".into(),
+            model_path: None,
+            timeout_secs: 1,
+            max_candidates: 4,
+        };
+
+        let narrow_filters = crate::search::query::SearchFilters {
+            language: Some("en".into()),
+            extension: Some("epub".into()),
+            year: Some(2024),
+            limit: 10,
+        };
+        let narrow = expand_with_provider(
+            &conn,
+            &search_db_path,
+            "llm interpretability",
+            &narrow_filters,
+            &options,
+            &provider,
+        );
+        assert!(!narrow.debug.cache_hit);
+        assert!(narrow.accepted_queries.is_empty());
+
+        let broad_filters = crate::search::query::SearchFilters {
+            language: Some("en".into()),
+            extension: Some("pdf".into()),
+            year: Some(2024),
+            limit: 10,
+        };
+        let broad = expand_with_provider(
+            &conn,
+            &search_db_path,
+            "llm interpretability",
+            &broad_filters,
+            &options,
+            &provider,
+        );
+        assert!(!broad.debug.cache_hit);
+        assert_eq!(
+            broad.accepted_queries,
+            vec!["large language model interpretability".to_string()]
+        );
+        assert_eq!(*calls.lock().unwrap(), 2);
 
         let _ = std::fs::remove_file(search_db_path);
         let _ = std::fs::remove_file(cache_path);
