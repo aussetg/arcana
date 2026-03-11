@@ -4,6 +4,7 @@ pub mod config;
 pub mod db;
 pub mod download;
 pub mod extract;
+pub mod link_local;
 pub mod model;
 pub mod normalize;
 pub mod output;

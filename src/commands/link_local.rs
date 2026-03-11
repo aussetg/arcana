@@ -1,12 +1,14 @@
 use std::collections::HashSet;
 use std::fs;
-use std::io::{BufReader, Read};
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
 use clap::Args;
 use rusqlite::{Connection, params};
 
+use crate::link_local::{
+    LocalFileInfo, build_local_file_info, normalize_for_match, significant_terms,
+};
 use crate::output::link_local::{
     LinkEvidenceKind, LinkLocalAmbiguity, LinkLocalEntry, LinkLocalEvidence, LinkLocalIdentifiers,
     LinkLocalMatched, LinkLocalRecord, LinkLocalReport, LinkLocalStats, LinkLocalStatus,
@@ -71,18 +73,6 @@ struct LinkStats {
     ambiguous: usize,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct LocalFileInfo {
-    canonical_path: PathBuf,
-    file_name: String,
-    stem_normalized: String,
-    md5_candidates: Vec<String>,
-    isbn10_candidates: Vec<String>,
-    isbn13_candidates: Vec<String>,
-    search_terms: Vec<String>,
-    used_content_md5: bool,
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum MatchMethod {
     Md5,
@@ -120,12 +110,6 @@ struct MatchEvidence {
     used_content_md5: bool,
     search_terms: Vec<String>,
 }
-
-const NOISE_TERMS: &[&str] = &[
-    "ebook", "book", "books", "scan", "scanned", "ocr", "libgen", "zlib", "epub", "pdf", "djvu",
-    "mobi", "azw3", "azw", "fb2", "edition", "ed", "vol", "volume", "v2", "v3", "retail", "fixed",
-    "clean", "text", "author", "title",
-];
 
 pub fn run(args: LinkLocalArgs) -> Result<()> {
     let json = args.json;
@@ -770,189 +754,6 @@ fn collect_local_files(
     Ok(())
 }
 
-fn build_local_file_info(path: &Path, hash_md5: bool) -> Result<LocalFileInfo> {
-    let canonical_path = fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
-    let file_name = path
-        .file_name()
-        .and_then(|value| value.to_str())
-        .context("file name is not valid UTF-8")?
-        .to_string();
-    let stem = path
-        .file_stem()
-        .and_then(|value| value.to_str())
-        .context("file stem is not valid UTF-8")?;
-
-    let stem_normalized = normalize_for_match(stem);
-    let search_terms = significant_terms(&stem_normalized);
-    let mut md5_candidates = Vec::new();
-    let mut seen_md5 = HashSet::new();
-    let mut used_content_md5 = false;
-
-    if hash_md5 {
-        if let Ok(md5) = compute_file_md5(path) {
-            if seen_md5.insert(md5.clone()) {
-                md5_candidates.push(md5);
-            }
-            used_content_md5 = true;
-        }
-    }
-
-    for md5 in extract_md5_candidates(&file_name) {
-        if seen_md5.insert(md5.clone()) {
-            md5_candidates.push(md5);
-        }
-    }
-
-    let (isbn10_candidates, isbn13_candidates) = extract_isbn_candidates(&file_name);
-
-    Ok(LocalFileInfo {
-        canonical_path,
-        file_name,
-        stem_normalized,
-        md5_candidates,
-        isbn10_candidates,
-        isbn13_candidates,
-        search_terms,
-        used_content_md5,
-    })
-}
-
-fn compute_file_md5(path: &Path) -> Result<String> {
-    let file =
-        fs::File::open(path).with_context(|| format!("failed to open {}", path.display()))?;
-    let mut reader = BufReader::new(file);
-    let mut context = md5::Context::new();
-    let mut buffer = [0u8; 1024 * 1024];
-
-    loop {
-        let read = reader
-            .read(&mut buffer)
-            .with_context(|| format!("failed to read {}", path.display()))?;
-        if read == 0 {
-            break;
-        }
-        context.consume(&buffer[..read]);
-    }
-
-    Ok(format!("{:x}", context.compute()))
-}
-
-fn extract_md5_candidates(input: &str) -> Vec<String> {
-    let mut out = Vec::new();
-    let mut seen = HashSet::new();
-
-    for token in split_hexdigit_runs(input) {
-        if token.len() == 32 && token.chars().all(|character| character.is_ascii_hexdigit()) {
-            let lowered = token.to_ascii_lowercase();
-            if seen.insert(lowered.clone()) {
-                out.push(lowered);
-            }
-        }
-    }
-
-    out
-}
-
-fn extract_isbn_candidates(input: &str) -> (Vec<String>, Vec<String>) {
-    let mut isbn10 = Vec::new();
-    let mut isbn13 = Vec::new();
-    let mut seen10 = HashSet::new();
-    let mut seen13 = HashSet::new();
-
-    for token in split_isbnish_runs(input) {
-        let compact = token
-            .chars()
-            .filter(|character| {
-                character.is_ascii_digit() || *character == 'X' || *character == 'x'
-            })
-            .collect::<String>();
-
-        if compact.len() == 13 && compact.chars().all(|character| character.is_ascii_digit()) {
-            if seen13.insert(compact.clone()) {
-                isbn13.push(compact);
-            }
-        } else if compact.len() == 10
-            && compact.chars().enumerate().all(|(index, character)| {
-                character.is_ascii_digit() || (index == 9 && matches!(character, 'X' | 'x'))
-            })
-        {
-            let normalized = compact.to_ascii_uppercase();
-            if seen10.insert(normalized.clone()) {
-                isbn10.push(normalized);
-            }
-        }
-    }
-
-    (isbn10, isbn13)
-}
-
-fn split_hexdigit_runs(input: &str) -> Vec<String> {
-    let mut tokens = Vec::new();
-    let mut current = String::new();
-
-    for character in input.chars() {
-        if character.is_ascii_hexdigit() {
-            current.push(character);
-        } else if !current.is_empty() {
-            tokens.push(std::mem::take(&mut current));
-        }
-    }
-
-    if !current.is_empty() {
-        tokens.push(current);
-    }
-
-    tokens
-}
-
-fn split_isbnish_runs(input: &str) -> Vec<String> {
-    let mut tokens = Vec::new();
-    let mut current = String::new();
-
-    for character in input.chars() {
-        if character.is_ascii_digit() || character == 'X' || character == 'x' || character == '-' {
-            current.push(character);
-        } else if !current.is_empty() {
-            tokens.push(std::mem::take(&mut current));
-        }
-    }
-
-    if !current.is_empty() {
-        tokens.push(current);
-    }
-
-    tokens
-}
-
-fn normalize_for_match(input: &str) -> String {
-    input
-        .chars()
-        .map(|character| {
-            if character.is_ascii_alphanumeric() {
-                character.to_ascii_lowercase()
-            } else {
-                ' '
-            }
-        })
-        .collect::<String>()
-        .split_whitespace()
-        .collect::<Vec<_>>()
-        .join(" ")
-}
-
-fn significant_terms(input: &str) -> Vec<String> {
-    input
-        .split_whitespace()
-        .filter(|term| term.len() >= 3)
-        .filter(|term| {
-            term.chars()
-                .any(|character| character.is_ascii_alphabetic())
-        })
-        .filter(|term| !NOISE_TERMS.contains(term))
-        .map(ToString::to_string)
-        .collect()
-}
-
 #[cfg(test)]
 mod tests {
     use std::fs;
@@ -961,13 +762,14 @@ mod tests {
 
     use rusqlite::Connection;
 
+    use crate::link_local::{
+        build_local_file_info, compute_file_md5, extract_isbn_candidates, extract_md5_candidates,
+        normalize_for_match,
+    };
     use crate::model::{ExactCode, ExtractedRecord, FlatRecord};
     use crate::output::link_local::{LinkLocalStatus, LinkMatchMethod};
 
-    use super::{
-        LinkOptions, build_local_file_info, compute_file_md5, extract_isbn_candidates,
-        extract_md5_candidates, link_local_files, normalize_for_match,
-    };
+    use super::{LinkOptions, link_local_files};
 
     fn unique_path(name: &str) -> PathBuf {
         let nonce = SystemTime::now()
