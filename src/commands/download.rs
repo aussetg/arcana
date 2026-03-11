@@ -70,14 +70,7 @@ pub struct DownloadArgs {
 
 pub fn run(args: DownloadArgs) -> Result<()> {
     let json = args.json;
-    match run_inner(args) {
-        Ok(()) => Ok(()),
-        Err(error) if json => {
-            crate::output::error::print_json("download", &error)?;
-            Err(crate::output::error::already_reported())
-        }
-        Err(error) => Err(error),
-    }
+    crate::output::error::run_json("download", json, || run_inner(args))
 }
 
 fn run_inner(args: DownloadArgs) -> Result<()> {

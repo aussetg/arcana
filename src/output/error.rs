@@ -1,6 +1,6 @@
 use std::fmt;
 
-use anyhow::Error;
+use anyhow::{Error, Result};
 use serde::Serialize;
 
 #[derive(Debug)]
@@ -35,4 +35,18 @@ pub fn print_json(command: &str, error: &Error) -> anyhow::Result<()> {
 
 pub fn already_reported() -> Error {
     AlreadyReportedError.into()
+}
+
+pub fn run_json<F>(command: &str, json: bool, f: F) -> Result<()>
+where
+    F: FnOnce() -> Result<()>,
+{
+    match f() {
+        Ok(()) => Ok(()),
+        Err(error) if json => {
+            print_json(command, &error)?;
+            Err(already_reported())
+        }
+        Err(error) => Err(error),
+    }
 }
