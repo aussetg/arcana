@@ -118,6 +118,8 @@
    --filename-mode flat
  ```
 
+ Interrupted downloads automatically resume from `.part` files when the server supports range requests.
+
  Show resolved config:
 
  ```sh

@@ -9,6 +9,7 @@ use clap::ValueEnum;
 use md5::Context as Md5Context;
 use reqwest::StatusCode;
 use reqwest::blocking::Client;
+use reqwest::header::RANGE;
 use serde::Deserialize;
 
 use crate::records::RecordSummary;
@@ -127,33 +128,49 @@ pub fn download_to_path(
             .with_context(|| format!("failed to remove {}", destination.display()))?;
     }
 
-    let temporary_path = temporary_download_path(destination);
-    if temporary_path.exists() {
-        fs::remove_file(&temporary_path)
-            .with_context(|| format!("failed to remove {}", temporary_path.display()))?;
+    let partial_path = partial_download_path(destination);
+    if replace_existing && partial_path.exists() {
+        fs::remove_file(&partial_path)
+            .with_context(|| format!("failed to remove {}", partial_path.display()))?;
     }
 
-    let response = client
-        .get(download_url)
+    let existing_partial_len = partial_path.metadata().map(|meta| meta.len()).unwrap_or(0);
+
+    let mut request = client.get(download_url);
+    if existing_partial_len > 0 {
+        request = request.header(RANGE, format!("bytes={existing_partial_len}-"));
+    }
+
+    let response = request
         .send()
         .with_context(|| format!("failed to download {download_url}"))?;
 
-    if response.status() != StatusCode::OK {
-        bail!("download server returned status {}", response.status())
+    let status = response.status();
+
+    match status {
+        StatusCode::OK => write_response_to_partial(response, &partial_path, false)?,
+        StatusCode::PARTIAL_CONTENT => {
+            write_response_to_partial(response, &partial_path, existing_partial_len > 0)?
+        }
+        StatusCode::RANGE_NOT_SATISFIABLE if existing_partial_len > 0 => {
+            fs::remove_file(&partial_path)
+                .with_context(|| format!("failed to remove {}", partial_path.display()))?;
+            let retry = client
+                .get(download_url)
+                .send()
+                .with_context(|| format!("failed to retry download {download_url}"))?;
+            if retry.status() != StatusCode::OK {
+                bail!("download server returned status {}", retry.status())
+            }
+            write_response_to_partial(retry, &partial_path, false)?;
+        }
+        _ => bail!("download server returned status {}", status),
     }
 
-    let mut response = response;
-    let mut file = File::create(&temporary_path)
-        .with_context(|| format!("failed to create {}", temporary_path.display()))?;
-    response
-        .copy_to(&mut file)
-        .context("failed while streaming download body")?;
-    file.flush()?;
-
-    fs::rename(&temporary_path, destination).with_context(|| {
+    fs::rename(&partial_path, destination).with_context(|| {
         format!(
             "failed to move {} to {}",
-            temporary_path.display(),
+            partial_path.display(),
             destination.display()
         )
     })?;
@@ -245,19 +262,42 @@ fn file_md5_hex(path: &Path) -> Result<String> {
     Ok(format!("{:x}", context.compute()))
 }
 
-fn temporary_download_path(destination: &Path) -> PathBuf {
-    let nonce = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_nanos();
-
-    let extension = destination
-        .extension()
+fn partial_download_path(destination: &Path) -> PathBuf {
+    let file_name = destination
+        .file_name()
         .and_then(|value| value.to_str())
-        .map(|value| format!("{value}.part.{nonce}"))
-        .unwrap_or_else(|| format!("part.{nonce}"));
+        .map(|value| format!("{value}.part"))
+        .unwrap_or_else(|| {
+            let nonce = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos();
+            format!("arcana-download-{nonce}.part")
+        });
 
-    destination.with_extension(extension)
+    destination.with_file_name(file_name)
+}
+
+fn write_response_to_partial(
+    mut response: reqwest::blocking::Response,
+    partial_path: &Path,
+    append: bool,
+) -> Result<()> {
+    let mut file = if append {
+        File::options()
+            .append(true)
+            .open(partial_path)
+            .with_context(|| format!("failed to open {}", partial_path.display()))?
+    } else {
+        File::create(partial_path)
+            .with_context(|| format!("failed to create {}", partial_path.display()))?
+    };
+
+    response
+        .copy_to(&mut file)
+        .context("failed while streaming download body")?;
+    file.flush()?;
+    Ok(())
 }
 
 #[cfg(test)]
@@ -275,8 +315,8 @@ mod tests {
     use crate::records::RecordSummary;
 
     use super::{
-        FilenameMode, destination_path, file_matches_md5, request_fast_download_url,
-        sanitize_file_name, verify_file_md5,
+        FilenameMode, destination_path, download_to_path, file_matches_md5,
+        request_fast_download_url, sanitize_file_name, verify_file_md5,
     };
 
     #[test]
@@ -442,5 +482,55 @@ mod tests {
         assert!(error.contains("invalid key"));
         rx.recv().unwrap();
         handle.join().unwrap();
+    }
+
+    #[test]
+    fn resumes_from_partial_download() {
+        let root = std::env::temp_dir().join(format!(
+            "arcana-download-resume-{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&root).unwrap();
+        let destination = root.join("book.pdf");
+        let partial = root.join("book.pdf.part");
+        fs::write(&partial, b"hello ").unwrap();
+
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        drop(listener);
+
+        let server = Server::http(address).unwrap();
+        let (tx, rx) = mpsc::channel();
+
+        let handle = thread::spawn(move || {
+            let request = server.recv().unwrap();
+            let range_header = request
+                .headers()
+                .iter()
+                .find(|header| header.field.as_str().as_str().eq_ignore_ascii_case("Range"))
+                .unwrap();
+            assert_eq!(range_header.value.as_str(), "bytes=6-");
+            let response = Response::from_data(b"world".to_vec()).with_status_code(206);
+            request.respond(response).unwrap();
+            tx.send(()).unwrap();
+        });
+
+        let client = Client::builder().build().unwrap();
+        download_to_path(
+            &client,
+            &format!("http://{address}/file.pdf"),
+            &destination,
+            false,
+        )
+        .unwrap();
+
+        assert_eq!(fs::read(&destination).unwrap(), b"hello world");
+        assert!(!partial.exists());
+        rx.recv().unwrap();
+        handle.join().unwrap();
+        let _ = fs::remove_dir_all(root);
     }
 }
