@@ -1,20 +1,12 @@
-use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result};
 use clap::Args;
-use reqwest::blocking::Client;
-use rusqlite::{Connection, params};
+use rusqlite::Connection;
 
-use crate::download::{
-    FilenameMode, destination_path, download_to_path, file_matches_md5, request_fast_download_url,
-    verify_file_md5,
-};
-use crate::output::download::{
-    DownloadOutcome, DownloadRecord, DownloadReport, DownloadRequest, DownloadStatus,
-};
-use crate::output::report::REPORT_VERSION;
-use crate::records::{RecordSelector, resolve_unique_record};
+use crate::download::{DownloadOptions, FilenameMode, execute_download};
+use crate::output::download::DownloadReport;
+use crate::records::RecordSelector;
 
 #[derive(Debug, Args)]
 pub struct DownloadArgs {
@@ -89,105 +81,23 @@ fn run_inner(args: DownloadArgs) -> Result<()> {
         .with_context(|| format!("failed to open {}", db_path.display()))?;
     crate::db::pragmas::apply_query_pragmas(&conn)?;
 
-    let record = resolve_unique_record(&conn, &selector)?;
-    let record_md5 = record
-        .md5
-        .as_deref()
-        .filter(|md5| !md5.trim().is_empty())
-        .context("record has no md5; fast download API requires md5")?;
-    let destination = destination_path(
-        &output_dir,
-        &record,
-        args.filename_mode,
-        args.output_name.as_deref(),
-    )?;
-
-    fs::create_dir_all(&output_dir)
-        .with_context(|| format!("failed to create {}", output_dir.display()))?;
-
-    if destination.exists() {
-        if file_matches_md5(&destination, record_md5)? {
-            let mut local_path_updated = false;
-            if !args.no_link {
-                update_local_path(&mut conn, record.rid, &destination)?;
-                local_path_updated = true;
-            }
-            let report = build_report(
-                &selector,
-                &record,
-                &output_dir,
-                &destination,
-                &args,
-                DownloadOutcome {
-                    status: DownloadStatus::AlreadyPresent,
-                    network_used: false,
-                    resumed_partial: false,
-                    restarted_partial: false,
-                    md5_checked: true,
-                    md5_ok: Some(true),
-                    local_path_updated,
-                },
-            );
-            if args.json {
-                crate::output::download::print_json(&report)?;
-            } else {
-                crate::output::download::print_text(&report);
-            }
-            return Ok(());
-        }
-
-        if !args.replace_existing {
-            bail!(
-                "destination already exists but md5 does not match expected record: {} (pass --replace-existing to overwrite)",
-                destination.display()
-            );
-        }
-    }
-
-    let secret_key = config.secret_key()?;
-
-    let client = Client::builder()
-        .user_agent("arcana/0.1")
-        .build()
-        .context("failed to build HTTP client")?;
-
-    let download_url = request_fast_download_url(
-        &client,
-        config.fast_download_api_url(),
-        record_md5,
-        &secret_key,
-        args.path_index,
-        args.domain_index,
-    )?;
-
-    let transfer = download_to_path(&client, &download_url, &destination, args.replace_existing)?;
-
-    if args.verify_md5 {
-        if let Err(error) = verify_file_md5(&destination, record_md5) {
-            let _ = fs::remove_file(&destination);
-            return Err(error).context("download verification failed; removed downloaded file");
-        }
-    }
-
-    if !args.no_link {
-        update_local_path(&mut conn, record.rid, &destination)?;
-    }
-
-    let report = build_report(
+    let options = DownloadOptions {
+        output_dir,
+        path_index: args.path_index,
+        domain_index: args.domain_index,
+        replace_existing: args.replace_existing,
+        verify_md5: args.verify_md5,
+        output_name: args.output_name.clone(),
+        filename_mode: args.filename_mode,
+        no_link: args.no_link,
+    };
+    let execution = execute_download(&mut conn, &config, &selector, &options)?;
+    let report = DownloadReport::new(
         &selector,
-        &record,
-        &output_dir,
-        &destination,
-        &args,
-        DownloadOutcome {
-            status: DownloadStatus::Downloaded,
-            network_used: true,
-            resumed_partial: transfer.resumed_partial,
-            restarted_partial: transfer.restarted_partial,
-            md5_checked: args.verify_md5,
-            md5_ok: args.verify_md5.then_some(true),
-            local_path_updated: !args.no_link,
-        },
+        &execution.record,
+        &options,
+        &execution.destination,
+        execution.outcome,
     );
 
     if args.json {
@@ -195,49 +105,6 @@ fn run_inner(args: DownloadArgs) -> Result<()> {
     } else {
         crate::output::download::print_text(&report);
     }
-    Ok(())
-}
-
-fn build_report(
-    selector: &RecordSelector,
-    record: &crate::records::RecordSummary,
-    output_dir: &Path,
-    destination: &Path,
-    args: &DownloadArgs,
-    outcome: DownloadOutcome,
-) -> DownloadReport {
-    DownloadReport {
-        report_version: REPORT_VERSION,
-        kind: "download_report",
-        request: DownloadRequest {
-            selector: selector.into(),
-            output_dir: output_dir.display().to_string(),
-            output_name: args.output_name.clone(),
-            filename_mode: args.filename_mode,
-            replace_existing: args.replace_existing,
-            verify_md5: args.verify_md5,
-            no_link: args.no_link,
-            path_index: args.path_index,
-            domain_index: args.domain_index,
-        },
-        record: DownloadRecord {
-            aa_id: record.aa_id.clone(),
-            md5: record.md5.clone().unwrap_or_default(),
-            title: record.title.clone(),
-            author: record.author.clone(),
-            extension: record.extension.clone(),
-            original_filename: record.original_filename.clone(),
-        },
-        destination: destination.display().to_string(),
-        outcome,
-    }
-}
-
-fn update_local_path(conn: &mut Connection, rid: i64, destination: &Path) -> Result<()> {
-    conn.execute(
-        "UPDATE records SET local_path = ?1 WHERE rid = ?2",
-        params![destination.display().to_string(), rid],
-    )?;
     Ok(())
 }
 

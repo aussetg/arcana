@@ -1,9 +1,10 @@
 use anyhow::Result;
 use serde::Serialize;
 
-use crate::download::FilenameMode;
+use crate::download::{DownloadOptions, FilenameMode};
+use crate::output::report::REPORT_VERSION;
 use crate::output::report::print_json as print_report_json;
-use crate::records::RecordSelector;
+use crate::records::{RecordSelector, RecordSummary};
 
 #[derive(Debug, Clone, Serialize)]
 pub struct DownloadReport {
@@ -110,6 +111,42 @@ impl From<&RecordSelector> for DownloadSelector {
                 mode: DownloadSelectorMode::Doi,
                 value: text.clone(),
             },
+        }
+    }
+}
+
+impl DownloadReport {
+    pub fn new(
+        selector: &RecordSelector,
+        record: &RecordSummary,
+        options: &DownloadOptions,
+        destination: &std::path::Path,
+        outcome: DownloadOutcome,
+    ) -> Self {
+        Self {
+            report_version: REPORT_VERSION,
+            kind: "download_report",
+            request: DownloadRequest {
+                selector: selector.into(),
+                output_dir: options.output_dir.display().to_string(),
+                output_name: options.output_name.clone(),
+                filename_mode: options.filename_mode,
+                replace_existing: options.replace_existing,
+                verify_md5: options.verify_md5,
+                no_link: options.no_link,
+                path_index: options.path_index,
+                domain_index: options.domain_index,
+            },
+            record: DownloadRecord {
+                aa_id: record.aa_id.clone(),
+                md5: record.md5.clone().unwrap_or_default(),
+                title: record.title.clone(),
+                author: record.author.clone(),
+                extension: record.extension.clone(),
+                original_filename: record.original_filename.clone(),
+            },
+            destination: destination.display().to_string(),
+            outcome,
         }
     }
 }

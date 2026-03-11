@@ -1,9 +1,11 @@
 mod api;
 mod naming;
+mod service;
 mod transfer;
 
 pub use api::request_fast_download_url;
 pub use naming::{FilenameMode, destination_path, sanitize_file_name};
+pub use service::{DownloadExecution, DownloadOptions, execute_download};
 pub use transfer::{DownloadTransferResult, download_to_path, file_matches_md5, verify_file_md5};
 
 #[cfg(test)]
