@@ -11,6 +11,7 @@ use crate::output::link_local::{
     LinkLocalAmbiguity, LinkLocalEntry, LinkLocalEvidence, LinkLocalIdentifiers, LinkLocalMatched,
     LinkLocalRecord, LinkLocalReport, LinkLocalStats, LinkLocalStatus, LinkMatchMethod,
 };
+use crate::output::report::REPORT_VERSION;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct LinkOptions {
@@ -190,7 +191,7 @@ pub fn link_local_files(
         tx.commit()?;
     }
     Ok(LinkLocalReport {
-        report_version: 1,
+        report_version: REPORT_VERSION,
         kind: "link_local_report",
         dry_run: options.dry_run,
         stats: LinkLocalStats {

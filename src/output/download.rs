@@ -2,6 +2,7 @@ use anyhow::Result;
 use serde::Serialize;
 
 use crate::download::FilenameMode;
+use crate::output::report::print_json as print_report_json;
 use crate::records::RecordSelector;
 
 #[derive(Debug, Clone, Serialize)]
@@ -87,8 +88,7 @@ pub fn print_text(report: &DownloadReport) {
 }
 
 pub fn print_json(report: &DownloadReport) -> Result<()> {
-    println!("{}", serde_json::to_string_pretty(report)?);
-    Ok(())
+    print_report_json(report)
 }
 
 impl From<&RecordSelector> for DownloadSelector {

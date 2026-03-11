@@ -3,6 +3,8 @@ use std::fmt;
 use anyhow::{Error, Result};
 use serde::Serialize;
 
+use crate::output::report::{REPORT_VERSION, eprint_json};
+
 #[derive(Debug)]
 pub struct AlreadyReportedError;
 
@@ -24,13 +26,12 @@ struct ErrorReport {
 
 pub fn print_json(command: &str, error: &Error) -> anyhow::Result<()> {
     let report = ErrorReport {
-        report_version: 1,
+        report_version: REPORT_VERSION,
         kind: "error_report",
         command: command.to_string(),
         message: format!("{error:#}"),
     };
-    eprintln!("{}", serde_json::to_string_pretty(&report)?);
-    Ok(())
+    eprint_json(&report)
 }
 
 pub fn already_reported() -> Error {

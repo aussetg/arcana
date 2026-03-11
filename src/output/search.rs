@@ -1,4 +1,5 @@
 use crate::model::SearchResult;
+use crate::output::report::{REPORT_VERSION, print_json as print_report_json};
 use crate::search::expand::ExpansionDebugReport;
 use crate::search::query::SearchFilters;
 use serde::Serialize;
@@ -49,7 +50,7 @@ impl SearchReport {
         expansion: Option<ExpansionDebugReport>,
     ) -> Self {
         Self {
-            report_version: 1,
+            report_version: REPORT_VERSION,
             kind: "search_report",
             request: SearchRequest {
                 mode,
@@ -85,8 +86,7 @@ pub fn print_text(report: &SearchReport) {
 }
 
 pub fn print_json(report: &SearchReport) -> anyhow::Result<()> {
-    println!("{}", serde_json::to_string_pretty(report)?);
-    Ok(())
+    print_report_json(report)
 }
 
 fn print_expansion_debug(report: &ExpansionDebugReport) {

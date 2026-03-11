@@ -1,3 +1,4 @@
+use crate::output::report::print_json as print_report_json;
 use serde::Serialize;
 
 #[derive(Debug, Clone, Serialize)]
@@ -131,6 +132,5 @@ pub fn print_summary(report: &LinkLocalReport) {
 }
 
 pub fn print_json(report: &LinkLocalReport) -> anyhow::Result<()> {
-    println!("{}", serde_json::to_string_pretty(report)?);
-    Ok(())
+    print_report_json(report)
 }

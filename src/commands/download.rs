@@ -13,6 +13,7 @@ use crate::download::{
 use crate::output::download::{
     DownloadOutcome, DownloadRecord, DownloadReport, DownloadRequest, DownloadStatus,
 };
+use crate::output::report::REPORT_VERSION;
 use crate::records::{RecordSelector, resolve_unique_record};
 
 #[derive(Debug, Args)]
@@ -206,7 +207,7 @@ fn build_report(
     outcome: DownloadOutcome,
 ) -> DownloadReport {
     DownloadReport {
-        report_version: 1,
+        report_version: REPORT_VERSION,
         kind: "download_report",
         request: DownloadRequest {
             selector: selector.into(),

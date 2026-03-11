@@ -2,6 +2,7 @@ use anyhow::Result;
 use serde::Serialize;
 
 use crate::config::{Resolved, ResolvedConfig};
+use crate::output::report::{REPORT_VERSION, print_json as print_report_json};
 
 pub fn print_text(config: &ResolvedConfig) -> Result<()> {
     println!("config_file: {}", config.config_file.display());
@@ -48,38 +49,26 @@ pub fn print_text(config: &ResolvedConfig) -> Result<()> {
 }
 
 pub fn print_json(config: &ResolvedConfig) -> Result<()> {
-    println!(
-        "{}",
-        serde_json::to_string_pretty(&ConfigReport::from(config))?
-    );
-    Ok(())
+    print_report_json(&ConfigReport::from(config))
 }
 
 pub fn print_json_path(path: &std::path::Path, exists: bool) -> Result<()> {
-    println!(
-        "{}",
-        serde_json::to_string_pretty(&ConfigPathReport {
-            report_version: 1,
-            kind: "config_path_report",
-            path: path.display().to_string(),
-            exists,
-        })?
-    );
-    Ok(())
+    print_report_json(&ConfigPathReport {
+        report_version: REPORT_VERSION,
+        kind: "config_path_report",
+        path: path.display().to_string(),
+        exists,
+    })
 }
 
 pub fn print_json_init(path: &std::path::Path, overwritten: bool) -> Result<()> {
-    println!(
-        "{}",
-        serde_json::to_string_pretty(&ConfigInitReport {
-            report_version: 1,
-            kind: "config_init_report",
-            path: path.display().to_string(),
-            created: true,
-            overwritten,
-        })?
-    );
-    Ok(())
+    print_report_json(&ConfigInitReport {
+        report_version: REPORT_VERSION,
+        kind: "config_init_report",
+        path: path.display().to_string(),
+        created: true,
+        overwritten,
+    })
 }
 
 #[derive(Debug, Serialize)]
@@ -130,7 +119,7 @@ struct ConfigInitReport {
 impl From<&ResolvedConfig> for ConfigReport {
     fn from(config: &ResolvedConfig) -> Self {
         Self {
-            report_version: 1,
+            report_version: REPORT_VERSION,
             kind: "config_report",
             config_file: config.config_file.display().to_string(),
             config_exists: config.config_exists,
