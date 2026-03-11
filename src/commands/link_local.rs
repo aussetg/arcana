@@ -7,7 +7,11 @@ use anyhow::{Context, Result, bail};
 use clap::Args;
 use rusqlite::{Connection, params};
 
-use crate::output::link_local::{LinkLocalEntry, LinkLocalRecord, LinkLocalReport, LinkLocalStats};
+use crate::output::link_local::{
+    LinkEvidenceKind, LinkLocalAmbiguity, LinkLocalEntry, LinkLocalEvidence, LinkLocalIdentifiers,
+    LinkLocalMatched, LinkLocalRecord, LinkLocalReport, LinkLocalStats, LinkLocalStatus,
+    LinkMatchMethod,
+};
 
 #[derive(Debug, Args)]
 pub struct LinkLocalArgs {
@@ -91,7 +95,7 @@ enum MatchMethod {
 struct LocalMatch {
     record: CandidateRecord,
     method: MatchMethod,
-    reason: String,
+    evidence: MatchEvidence,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -105,8 +109,16 @@ struct CandidateRecord {
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct AmbiguousMatch {
     method: MatchMethod,
-    reason: String,
+    evidence: MatchEvidence,
     candidates: Vec<CandidateRecord>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct MatchEvidence {
+    kind: LinkEvidenceKind,
+    value: Option<String>,
+    used_content_md5: bool,
+    search_terms: Vec<String>,
 }
 
 const NOISE_TERMS: &[&str] = &[
@@ -174,11 +186,14 @@ fn link_local_files(
                 stats.unmatched += 1;
                 entries.push(LinkLocalEntry {
                     path: path.display().to_string(),
-                    status: "unreadable".to_string(),
-                    matched_by: None,
-                    reason: None,
-                    record: None,
-                    candidates: Vec::new(),
+                    file_name: path
+                        .file_name()
+                        .and_then(|value| value.to_str())
+                        .map(str::to_string),
+                    identifiers: None,
+                    status: LinkLocalStatus::Unreadable,
+                    matched: None,
+                    ambiguity: None,
                     error: Some(format!("{error:#}")),
                 });
                 continue;
@@ -214,21 +229,25 @@ fn link_local_files(
                         },
                         info.canonical_path.display(),
                         local_match.record.aa_id,
-                        local_match.reason
+                        local_match.evidence.summary()
                     );
                 }
 
                 entries.push(LinkLocalEntry {
                     path: info.canonical_path.display().to_string(),
+                    file_name: Some(info.file_name.clone()),
+                    identifiers: Some(identifiers_from_info(&info)),
                     status: if options.dry_run {
-                        "would_link".to_string()
+                        LinkLocalStatus::WouldLink
                     } else {
-                        "linked".to_string()
+                        LinkLocalStatus::Linked
                     },
-                    matched_by: Some(local_match.method.label().to_string()),
-                    reason: Some(local_match.reason),
-                    record: Some(LinkLocalRecord::from(&local_match.record)),
-                    candidates: Vec::new(),
+                    matched: Some(LinkLocalMatched {
+                        method: local_match.method.json_value(),
+                        evidence: LinkLocalEvidence::from(&local_match.evidence),
+                        record: LinkLocalRecord::from(&local_match.record),
+                    }),
+                    ambiguity: None,
                     error: None,
                 });
 
@@ -251,22 +270,26 @@ fn link_local_files(
                         "[link-local] ambiguous [{}] {} ({}) candidates: {}",
                         ambiguous.method.label(),
                         info.canonical_path.display(),
-                        ambiguous.reason,
+                        ambiguous.evidence.summary(),
                         candidate_ids
                     );
                 }
                 stats.ambiguous += 1;
                 entries.push(LinkLocalEntry {
                     path: info.canonical_path.display().to_string(),
-                    status: "ambiguous".to_string(),
-                    matched_by: Some(ambiguous.method.label().to_string()),
-                    reason: Some(ambiguous.reason),
-                    record: None,
-                    candidates: ambiguous
-                        .candidates
-                        .iter()
-                        .map(LinkLocalRecord::from)
-                        .collect(),
+                    file_name: Some(info.file_name.clone()),
+                    identifiers: Some(identifiers_from_info(&info)),
+                    status: LinkLocalStatus::Ambiguous,
+                    matched: None,
+                    ambiguity: Some(LinkLocalAmbiguity {
+                        method: ambiguous.method.json_value(),
+                        evidence: LinkLocalEvidence::from(&ambiguous.evidence),
+                        candidates: ambiguous
+                            .candidates
+                            .iter()
+                            .map(LinkLocalRecord::from)
+                            .collect(),
+                    }),
                     error: None,
                 });
             }
@@ -277,11 +300,11 @@ fn link_local_files(
                 stats.unmatched += 1;
                 entries.push(LinkLocalEntry {
                     path: info.canonical_path.display().to_string(),
-                    status: "unmatched".to_string(),
-                    matched_by: None,
-                    reason: None,
-                    record: None,
-                    candidates: Vec::new(),
+                    file_name: Some(info.file_name.clone()),
+                    identifiers: Some(identifiers_from_info(&info)),
+                    status: LinkLocalStatus::Unmatched,
+                    matched: None,
+                    ambiguity: None,
                     error: None,
                 });
             }
@@ -295,10 +318,16 @@ fn link_local_files(
         tx.commit()?;
     }
     Ok(LinkLocalReport {
+        report_version: 1,
+        kind: "link_local_report",
         dry_run: options.dry_run,
         stats: LinkLocalStats {
             files_scanned: stats.files_scanned,
             files_hashed_md5: stats.files_hashed_md5,
+            linked_total: stats.linked_by_md5
+                + stats.linked_by_isbn
+                + stats.linked_by_original_filename
+                + stats.linked_by_title_author,
             linked_by_md5: stats.linked_by_md5,
             linked_by_isbn: stats.linked_by_isbn,
             linked_by_original_filename: stats.linked_by_original_filename,
@@ -319,6 +348,58 @@ impl MatchMethod {
             MatchMethod::TitleAuthor => "title_author",
         }
     }
+
+    fn json_value(self) -> LinkMatchMethod {
+        match self {
+            MatchMethod::Md5 => LinkMatchMethod::Md5,
+            MatchMethod::Isbn => LinkMatchMethod::Isbn,
+            MatchMethod::OriginalFilename => LinkMatchMethod::OriginalFilename,
+            MatchMethod::TitleAuthor => LinkMatchMethod::TitleAuthor,
+        }
+    }
+}
+
+impl MatchEvidence {
+    fn summary(&self) -> String {
+        match self.kind {
+            LinkEvidenceKind::Md5 => match (&self.value, self.used_content_md5) {
+                (Some(value), true) => format!("matched md5 {value} from file contents"),
+                (Some(value), false) => format!("matched md5 {value} from file name"),
+                (None, true) => "matched md5 from file contents".to_string(),
+                (None, false) => "matched md5".to_string(),
+            },
+            LinkEvidenceKind::Isbn10 => self
+                .value
+                .as_ref()
+                .map(|value| format!("matched isbn10 {value}"))
+                .unwrap_or_else(|| "matched isbn10".to_string()),
+            LinkEvidenceKind::Isbn13 => self
+                .value
+                .as_ref()
+                .map(|value| format!("matched isbn13 {value}"))
+                .unwrap_or_else(|| "matched isbn13".to_string()),
+            LinkEvidenceKind::OriginalFilename => self
+                .value
+                .as_ref()
+                .map(|value| format!("matched original filename {value}"))
+                .unwrap_or_else(|| "matched original filename".to_string()),
+            LinkEvidenceKind::TitleAuthor => {
+                format!("matched title/author terms {:?}", self.search_terms)
+            }
+        }
+    }
+}
+
+impl From<&MatchEvidence> for LinkLocalEvidence {
+    fn from(value: &MatchEvidence) -> Self {
+        Self {
+            kind: value.kind,
+            value: value.value.clone(),
+            used_content_md5: value.used_content_md5,
+            search_terms: value.search_terms.clone(),
+            summary: value.summary(),
+        }
+    }
 }
 
 impl From<&CandidateRecord> for LinkLocalRecord {
@@ -328,6 +409,16 @@ impl From<&CandidateRecord> for LinkLocalRecord {
             title: value.title.clone(),
             author: value.author.clone(),
         }
+    }
+}
+
+fn identifiers_from_info(info: &LocalFileInfo) -> LinkLocalIdentifiers {
+    LinkLocalIdentifiers {
+        md5_candidates: info.md5_candidates.clone(),
+        isbn10_candidates: info.isbn10_candidates.clone(),
+        isbn13_candidates: info.isbn13_candidates.clone(),
+        search_terms: info.search_terms.clone(),
+        used_content_md5: info.used_content_md5,
     }
 }
 
@@ -349,13 +440,23 @@ fn find_local_match(
                 return Ok(MatchSearchOutcome::Matched(LocalMatch {
                     record,
                     method: MatchMethod::Md5,
-                    reason: format!("matched md5 {}", md5),
+                    evidence: MatchEvidence {
+                        kind: LinkEvidenceKind::Md5,
+                        value: Some(md5.clone()),
+                        used_content_md5: info.used_content_md5,
+                        search_terms: Vec::new(),
+                    },
                 }));
             }
             UniqueLookup::Ambiguous(candidates) => {
                 return Ok(MatchSearchOutcome::Ambiguous(AmbiguousMatch {
                     method: MatchMethod::Md5,
-                    reason: format!("multiple records matched md5 {}", md5),
+                    evidence: MatchEvidence {
+                        kind: LinkEvidenceKind::Md5,
+                        value: Some(md5.clone()),
+                        used_content_md5: info.used_content_md5,
+                        search_terms: Vec::new(),
+                    },
                     candidates,
                 }));
             }
@@ -369,13 +470,23 @@ fn find_local_match(
                 return Ok(MatchSearchOutcome::Matched(LocalMatch {
                     record,
                     method: MatchMethod::Isbn,
-                    reason: format!("matched isbn13 {}", isbn13),
+                    evidence: MatchEvidence {
+                        kind: LinkEvidenceKind::Isbn13,
+                        value: Some(isbn13.clone()),
+                        used_content_md5: false,
+                        search_terms: Vec::new(),
+                    },
                 }));
             }
             UniqueLookup::Ambiguous(candidates) => {
                 return Ok(MatchSearchOutcome::Ambiguous(AmbiguousMatch {
                     method: MatchMethod::Isbn,
-                    reason: format!("multiple records matched isbn13 {}", isbn13),
+                    evidence: MatchEvidence {
+                        kind: LinkEvidenceKind::Isbn13,
+                        value: Some(isbn13.clone()),
+                        used_content_md5: false,
+                        search_terms: Vec::new(),
+                    },
                     candidates,
                 }));
             }
@@ -389,13 +500,23 @@ fn find_local_match(
                 return Ok(MatchSearchOutcome::Matched(LocalMatch {
                     record,
                     method: MatchMethod::Isbn,
-                    reason: format!("matched isbn10 {}", isbn10),
+                    evidence: MatchEvidence {
+                        kind: LinkEvidenceKind::Isbn10,
+                        value: Some(isbn10.clone()),
+                        used_content_md5: false,
+                        search_terms: Vec::new(),
+                    },
                 }));
             }
             UniqueLookup::Ambiguous(candidates) => {
                 return Ok(MatchSearchOutcome::Ambiguous(AmbiguousMatch {
                     method: MatchMethod::Isbn,
-                    reason: format!("multiple records matched isbn10 {}", isbn10),
+                    evidence: MatchEvidence {
+                        kind: LinkEvidenceKind::Isbn10,
+                        value: Some(isbn10.clone()),
+                        used_content_md5: false,
+                        search_terms: Vec::new(),
+                    },
                     candidates,
                 }));
             }
@@ -408,16 +529,23 @@ fn find_local_match(
             return Ok(MatchSearchOutcome::Matched(LocalMatch {
                 record,
                 method: MatchMethod::OriginalFilename,
-                reason: format!("matched original filename {}", info.file_name),
+                evidence: MatchEvidence {
+                    kind: LinkEvidenceKind::OriginalFilename,
+                    value: Some(info.file_name.clone()),
+                    used_content_md5: false,
+                    search_terms: Vec::new(),
+                },
             }));
         }
         UniqueLookup::Ambiguous(candidates) => {
             return Ok(MatchSearchOutcome::Ambiguous(AmbiguousMatch {
                 method: MatchMethod::OriginalFilename,
-                reason: format!(
-                    "multiple records matched original filename {}",
-                    info.file_name
-                ),
+                evidence: MatchEvidence {
+                    kind: LinkEvidenceKind::OriginalFilename,
+                    value: Some(info.file_name.clone()),
+                    used_content_md5: false,
+                    search_terms: Vec::new(),
+                },
                 candidates,
             }));
         }
@@ -428,14 +556,21 @@ fn find_local_match(
         UniqueLookup::Unique(record) => Ok(MatchSearchOutcome::Matched(LocalMatch {
             record,
             method: MatchMethod::TitleAuthor,
-            reason: format!("matched title/author terms {:?}", info.search_terms),
+            evidence: MatchEvidence {
+                kind: LinkEvidenceKind::TitleAuthor,
+                value: None,
+                used_content_md5: false,
+                search_terms: info.search_terms.clone(),
+            },
         })),
         UniqueLookup::Ambiguous(candidates) => Ok(MatchSearchOutcome::Ambiguous(AmbiguousMatch {
             method: MatchMethod::TitleAuthor,
-            reason: format!(
-                "multiple records matched title/author terms {:?}",
-                info.search_terms
-            ),
+            evidence: MatchEvidence {
+                kind: LinkEvidenceKind::TitleAuthor,
+                value: None,
+                used_content_md5: false,
+                search_terms: info.search_terms.clone(),
+            },
             candidates,
         })),
         UniqueLookup::None => Ok(MatchSearchOutcome::NoMatch),
@@ -823,6 +958,7 @@ mod tests {
     use rusqlite::Connection;
 
     use crate::model::{ExactCode, ExtractedRecord, FlatRecord};
+    use crate::output::link_local::{LinkLocalStatus, LinkMatchMethod};
 
     use super::{
         LinkOptions, build_local_file_info, compute_file_md5, extract_isbn_candidates,
@@ -1082,8 +1218,20 @@ mod tests {
         assert_eq!(report.stats.linked_by_md5, 1);
 
         let entry = &report.entries[0];
-        assert_eq!(entry.matched_by.as_deref(), Some("md5"));
-        assert!(entry.reason.as_deref().unwrap().contains("matched md5"));
+        assert!(matches!(entry.status, LinkLocalStatus::Linked));
+        assert!(matches!(
+            entry.matched.as_ref().map(|matched| matched.method),
+            Some(LinkMatchMethod::Md5)
+        ));
+        assert!(
+            entry
+                .matched
+                .as_ref()
+                .unwrap()
+                .evidence
+                .summary
+                .contains("matched md5")
+        );
 
         let local_path: Option<String> = conn
             .query_row(
@@ -1144,11 +1292,20 @@ mod tests {
 
         assert_eq!(report.stats.ambiguous, 1);
         let entry = &report.entries[0];
-        assert_eq!(entry.status, "ambiguous");
-        assert_eq!(entry.matched_by.as_deref(), Some("original_filename"));
-        assert_eq!(entry.candidates.len(), 2);
-        assert_eq!(entry.candidates[0].aa_id, "aa-1");
-        assert_eq!(entry.candidates[1].aa_id, "aa-2");
+        assert!(matches!(entry.status, LinkLocalStatus::Ambiguous));
+        assert!(matches!(
+            entry.ambiguity.as_ref().map(|ambiguity| ambiguity.method),
+            Some(LinkMatchMethod::OriginalFilename)
+        ));
+        assert_eq!(entry.ambiguity.as_ref().unwrap().candidates.len(), 2);
+        assert_eq!(
+            entry.ambiguity.as_ref().unwrap().candidates[0].aa_id,
+            "aa-1"
+        );
+        assert_eq!(
+            entry.ambiguity.as_ref().unwrap().candidates[1].aa_id,
+            "aa-2"
+        );
 
         let _ = fs::remove_file(db_path);
         let _ = fs::remove_file(file);

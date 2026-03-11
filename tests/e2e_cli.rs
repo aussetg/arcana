@@ -149,14 +149,23 @@ fn build_search_and_link_local_cli_end_to_end() {
         "--json",
     ]);
     let dry_json_value: Value = serde_json::from_str(&dry_json).unwrap();
+    assert_eq!(dry_json_value["report_version"], 1);
+    assert_eq!(dry_json_value["kind"], "link_local_report");
     assert_eq!(dry_json_value["dry_run"], true);
     assert_eq!(dry_json_value["entries"][0]["status"], "would_link");
-    assert_eq!(dry_json_value["entries"][0]["matched_by"], "isbn");
+    assert_eq!(dry_json_value["entries"][0]["matched"]["method"], "isbn");
     assert!(
-        dry_json_value["entries"][0]["reason"]
+        dry_json_value["entries"][0]["matched"]["evidence"]["summary"]
             .as_str()
             .unwrap()
             .contains("isbn13")
+    );
+    assert!(
+        dry_json_value["entries"][0]["identifiers"]["isbn13_candidates"]
+            .as_array()
+            .unwrap()
+            .len()
+            >= 1
     );
 
     let conn = Connection::open(&db).unwrap();
