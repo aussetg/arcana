@@ -15,6 +15,7 @@ pub struct Cli {
 #[derive(Debug, Subcommand)]
 enum Command {
     Build(crate::commands::build::BuildArgs),
+    Config(crate::commands::config::ConfigArgs),
     Search(crate::commands::search::SearchArgs),
     #[command(name = "link-local")]
     LinkLocal(crate::commands::link_local::LinkLocalArgs),
@@ -26,6 +27,7 @@ pub fn run() -> Result<()> {
 
     match cli.command {
         Command::Build(args) => crate::commands::build::run(args),
+        Command::Config(args) => crate::commands::config::run(args),
         Command::Search(args) => crate::commands::search::run(args),
         Command::LinkLocal(args) => crate::commands::link_local::run(args),
         Command::Download(args) => crate::commands::download::run(args),

@@ -101,6 +101,12 @@
    --isbn 9780131103627
  ```
 
+ Show resolved config:
+
+ ```sh
+ cargo run -- config
+ ```
+
  Local file linkage:
 
  ```sh
