@@ -115,8 +115,10 @@ pub fn run(args: DownloadArgs) -> Result<()> {
                 DownloadOutcome {
                     status: DownloadStatus::AlreadyPresent,
                     network_used: false,
+                    resumed_partial: false,
+                    restarted_partial: false,
                     md5_checked: true,
-                    md5_ok: true,
+                    md5_ok: Some(true),
                     local_path_updated,
                 },
             );
@@ -152,7 +154,7 @@ pub fn run(args: DownloadArgs) -> Result<()> {
         args.domain_index,
     )?;
 
-    download_to_path(&client, &download_url, &destination, args.replace_existing)?;
+    let transfer = download_to_path(&client, &download_url, &destination, args.replace_existing)?;
 
     if args.verify_md5 {
         if let Err(error) = verify_file_md5(&destination, record_md5) {
@@ -174,8 +176,10 @@ pub fn run(args: DownloadArgs) -> Result<()> {
         DownloadOutcome {
             status: DownloadStatus::Downloaded,
             network_used: true,
+            resumed_partial: transfer.resumed_partial,
+            restarted_partial: transfer.restarted_partial,
             md5_checked: args.verify_md5,
-            md5_ok: args.verify_md5,
+            md5_ok: args.verify_md5.then_some(true),
             local_path_updated: !args.no_link,
         },
     );

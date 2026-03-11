@@ -14,6 +14,12 @@ use serde::{Deserialize, Serialize};
 
 use crate::records::RecordSummary;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DownloadTransferResult {
+    pub resumed_partial: bool,
+    pub restarted_partial: bool,
+}
+
 #[derive(Debug, Deserialize)]
 struct FastDownloadResponse {
     download_url: Option<String>,
@@ -123,13 +129,26 @@ pub fn download_to_path(
     download_url: &str,
     destination: &Path,
     replace_existing: bool,
-) -> Result<()> {
+) -> Result<DownloadTransferResult> {
+    if destination.exists() && !destination.is_file() {
+        bail!(
+            "destination exists but is not a regular file: {}",
+            destination.display()
+        )
+    }
+
     if destination.exists() && replace_existing {
         fs::remove_file(destination)
             .with_context(|| format!("failed to remove {}", destination.display()))?;
     }
 
     let partial_path = partial_download_path(destination);
+    if partial_path.exists() && !partial_path.is_file() {
+        bail!(
+            "partial download path exists but is not a regular file: {}",
+            partial_path.display()
+        )
+    }
     if replace_existing && partial_path.exists() {
         fs::remove_file(&partial_path)
             .with_context(|| format!("failed to remove {}", partial_path.display()))?;
@@ -148,10 +167,20 @@ pub fn download_to_path(
 
     let status = response.status();
 
-    match status {
-        StatusCode::OK => write_response_to_partial(response, &partial_path, false)?,
+    let transfer = match status {
+        StatusCode::OK => {
+            write_response_to_partial(response, &partial_path, false)?;
+            DownloadTransferResult {
+                resumed_partial: false,
+                restarted_partial: existing_partial_len > 0,
+            }
+        }
         StatusCode::PARTIAL_CONTENT => {
-            write_response_to_partial(response, &partial_path, existing_partial_len > 0)?
+            write_response_to_partial(response, &partial_path, existing_partial_len > 0)?;
+            DownloadTransferResult {
+                resumed_partial: existing_partial_len > 0,
+                restarted_partial: false,
+            }
         }
         StatusCode::RANGE_NOT_SATISFIABLE if existing_partial_len > 0 => {
             fs::remove_file(&partial_path)
@@ -164,9 +193,13 @@ pub fn download_to_path(
                 bail!("download server returned status {}", retry.status())
             }
             write_response_to_partial(retry, &partial_path, false)?;
+            DownloadTransferResult {
+                resumed_partial: false,
+                restarted_partial: true,
+            }
         }
         _ => bail!("download server returned status {}", status),
-    }
+    };
 
     fs::rename(&partial_path, destination).with_context(|| {
         format!(
@@ -176,7 +209,7 @@ pub fn download_to_path(
         )
     })?;
 
-    Ok(())
+    Ok(transfer)
 }
 
 pub fn sanitize_file_name(input: &str) -> String {
@@ -316,7 +349,7 @@ mod tests {
     use crate::records::RecordSummary;
 
     use super::{
-        FilenameMode, destination_path, download_to_path, file_matches_md5,
+        DownloadTransferResult, FilenameMode, destination_path, download_to_path, file_matches_md5,
         request_fast_download_url, sanitize_file_name, verify_file_md5,
     };
 
@@ -520,7 +553,7 @@ mod tests {
         });
 
         let client = Client::builder().build().unwrap();
-        download_to_path(
+        let transfer = download_to_path(
             &client,
             &format!("http://{address}/file.pdf"),
             &destination,
@@ -528,10 +561,39 @@ mod tests {
         )
         .unwrap();
 
+        assert_eq!(
+            transfer,
+            DownloadTransferResult {
+                resumed_partial: true,
+                restarted_partial: false,
+            }
+        );
         assert_eq!(fs::read(&destination).unwrap(), b"hello world");
         assert!(!partial.exists());
         rx.recv().unwrap();
         handle.join().unwrap();
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn rejects_directory_destinations() {
+        let root = std::env::temp_dir().join(format!(
+            "arcana-download-dir-dest-{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&root).unwrap();
+        let destination = root.join("existing-dir");
+        fs::create_dir_all(&destination).unwrap();
+
+        let client = Client::builder().build().unwrap();
+        let error = download_to_path(&client, "http://127.0.0.1:1/unused", &destination, false)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("not a regular file"));
+
         let _ = fs::remove_dir_all(root);
     }
 }

@@ -63,8 +63,10 @@ pub struct DownloadRecord {
 pub struct DownloadOutcome {
     pub status: DownloadStatus,
     pub network_used: bool,
+    pub resumed_partial: bool,
+    pub restarted_partial: bool,
     pub md5_checked: bool,
-    pub md5_ok: bool,
+    pub md5_ok: Option<bool>,
     pub local_path_updated: bool,
 }
 
