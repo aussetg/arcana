@@ -2,6 +2,7 @@ pub mod cli;
 pub mod commands;
 pub mod config;
 pub mod db;
+pub mod download;
 pub mod extract;
 pub mod model;
 pub mod normalize;
