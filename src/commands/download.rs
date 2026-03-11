@@ -6,7 +6,10 @@ use clap::Args;
 use reqwest::blocking::Client;
 use rusqlite::{Connection, params};
 
-use crate::download::{destination_path, download_to_path, request_fast_download_url};
+use crate::download::{
+    FilenameMode, destination_path, download_to_path, file_matches_md5, request_fast_download_url,
+    verify_file_md5,
+};
 use crate::records::{RecordSelector, resolve_unique_record};
 
 #[derive(Debug, Args)]
@@ -46,6 +49,15 @@ pub struct DownloadArgs {
     #[arg(long, help = "Overwrite an existing file at the destination path")]
     pub replace_existing: bool,
 
+    #[arg(long, help = "Verify the downloaded file against the expected MD5")]
+    pub verify_md5: bool,
+
+    #[arg(long, value_name = "NAME", help = "Override the destination file name")]
+    pub output_name: Option<String>,
+
+    #[arg(long, value_enum, default_value_t = FilenameMode::Original)]
+    pub filename_mode: FilenameMode,
+
     #[arg(long, help = "Do not update records.local_path after download")]
     pub no_link: bool,
 }
@@ -71,25 +83,32 @@ pub fn run(args: DownloadArgs) -> Result<()> {
         .as_deref()
         .filter(|md5| !md5.trim().is_empty())
         .context("record has no md5; fast download API requires md5")?;
-    let destination = destination_path(&output_dir, &record)?;
-
-    if let Some(existing_local_path) = &record.local_path {
-        let existing_path = Path::new(existing_local_path);
-        if existing_path.exists() && !args.replace_existing {
-            println!("already linked locally: {}", existing_path.display());
-            return Ok(());
-        }
-    }
-
-    if destination.exists() && !args.replace_existing {
-        bail!(
-            "destination already exists: {} (pass --replace-existing to overwrite)",
-            destination.display()
-        );
-    }
+    let destination = destination_path(
+        &output_dir,
+        &record,
+        args.filename_mode,
+        args.output_name.as_deref(),
+    )?;
 
     fs::create_dir_all(&output_dir)
         .with_context(|| format!("failed to create {}", output_dir.display()))?;
+
+    if destination.exists() {
+        if file_matches_md5(&destination, record_md5)? {
+            if !args.no_link {
+                update_local_path(&mut conn, record.rid, &destination)?;
+            }
+            println!("already present and verified: {}", destination.display());
+            return Ok(());
+        }
+
+        if !args.replace_existing {
+            bail!(
+                "destination already exists but md5 does not match expected record: {} (pass --replace-existing to overwrite)",
+                destination.display()
+            );
+        }
+    }
 
     let secret_key = config.secret_key()?;
 
@@ -108,6 +127,13 @@ pub fn run(args: DownloadArgs) -> Result<()> {
     )?;
 
     download_to_path(&client, &download_url, &destination, args.replace_existing)?;
+
+    if args.verify_md5 {
+        if let Err(error) = verify_file_md5(&destination, record_md5) {
+            let _ = fs::remove_file(&destination);
+            return Err(error).context("download verification failed; removed downloaded file");
+        }
+    }
 
     if !args.no_link {
         update_local_path(&mut conn, record.rid, &destination)?;

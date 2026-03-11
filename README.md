@@ -107,6 +107,17 @@
    --isbn 9780131103627
  ```
 
+ Download with checksum verification and a flat output name:
+
+ ```sh
+ ANNAS_ARCHIVE_SECRET_KEY=... \
+ cargo run -- download \
+   --db data/arcana.sqlite3 \
+   --isbn 9780131103627 \
+   --verify-md5 \
+   --filename-mode flat
+ ```
+
  Show resolved config:
 
  ```sh

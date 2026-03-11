@@ -15,6 +15,7 @@ pub struct RecordSummary {
     pub aa_id: String,
     pub md5: Option<String>,
     pub title: Option<String>,
+    pub author: Option<String>,
     pub original_filename: Option<String>,
     pub extension: Option<String>,
     pub local_path: Option<String>,
@@ -85,7 +86,7 @@ pub fn resolve_unique_record(
         RecordSelector::AaId(aa_id) => resolve_unique_with_query(
             conn,
             selector,
-            "SELECT rid, aa_id, md5, title, original_filename, extension, local_path FROM records WHERE aa_id = ?1 ORDER BY rid LIMIT 2",
+            "SELECT rid, aa_id, md5, title, author, original_filename, extension, local_path FROM records WHERE aa_id = ?1 ORDER BY rid LIMIT 2",
             params![aa_id],
         ),
         RecordSelector::Md5(md5) => resolve_unique_by_code(conn, selector, &["md5"], md5),
@@ -103,7 +104,7 @@ fn resolve_unique_by_code(
     value: &str,
 ) -> Result<RecordSummary> {
     let mut sql = String::from(
-        "SELECT DISTINCT r.rid, r.aa_id, r.md5, r.title, r.original_filename, r.extension, r.local_path
+        "SELECT DISTINCT r.rid, r.aa_id, r.md5, r.title, r.author, r.original_filename, r.extension, r.local_path
          FROM records r
          JOIN record_codes rc ON rc.rid = r.rid
          WHERE lower(rc.value) = lower(?1) AND rc.kind IN (",
@@ -154,9 +155,10 @@ fn map_record_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<RecordSummary> {
         aa_id: row.get(1)?,
         md5: row.get(2)?,
         title: row.get(3)?,
-        original_filename: row.get(4)?,
-        extension: row.get(5)?,
-        local_path: row.get(6)?,
+        author: row.get(4)?,
+        original_filename: row.get(5)?,
+        extension: row.get(6)?,
+        local_path: row.get(7)?,
     })
 }
 
