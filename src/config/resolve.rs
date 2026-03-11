@@ -3,6 +3,7 @@ use std::fmt;
 use std::path::PathBuf;
 
 use anyhow::{Context, Result};
+use serde::Serialize;
 
 use crate::config::file::load as load_file;
 use crate::config::path::{
@@ -15,7 +16,8 @@ const DEFAULT_EXPAND_COMMAND: &str = "llama-cli";
 const DEFAULT_EXPAND_MODEL: &str = "~/Models/models--unsloth--Qwen3.5-0.8B-GGUF/snapshots/6ab461498e2023f6e3c1baea90a8f0fe38ab64d0/Qwen3.5-0.8B-UD-Q4_K_XL.gguf";
 const DEFAULT_EXPAND_TIMEOUT_SECS: u64 = 8;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
 pub enum ValueSource {
     ConfigFile,
     Xdg,
@@ -33,7 +35,7 @@ impl fmt::Display for ValueSource {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct Resolved<T> {
     pub value: T,
     pub source: ValueSource,

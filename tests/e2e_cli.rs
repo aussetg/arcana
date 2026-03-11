@@ -49,6 +49,27 @@ fn run_ok(args: &[&str]) -> String {
     String::from_utf8(output.stdout).unwrap()
 }
 
+fn run_ok_with_env(args: &[&str], envs: &[(&str, &str)], remove_envs: &[&str]) -> String {
+    let mut command = Command::new(bin());
+    command.args(args);
+    for (key, value) in envs {
+        command.env(key, value);
+    }
+    for key in remove_envs {
+        command.env_remove(key);
+    }
+
+    let output = command.output().unwrap();
+    assert!(
+        output.status.success(),
+        "command failed: {:?}\nstdout:\n{}\nstderr:\n{}",
+        args,
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    String::from_utf8(output.stdout).unwrap()
+}
+
 #[test]
 fn build_search_and_link_local_cli_end_to_end() {
     let root = unique_temp_dir("portable");
@@ -206,6 +227,56 @@ fn link_local_hash_md5_cli_end_to_end() {
         )
         .unwrap();
     assert!(linked_local_path.is_some());
+
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn config_cli_supports_path_init_and_json() {
+    let root = unique_temp_dir("config-cli");
+    let home = root.join("home");
+    fs::create_dir_all(&home).unwrap();
+
+    let path_out = run_ok_with_env(
+        &["config", "path"],
+        &[("HOME", home.to_str().unwrap())],
+        &["XDG_CONFIG_HOME", "XDG_DOWNLOAD_DIR"],
+    );
+    let expected_path = home.join(".config/arcana/config.yaml");
+    assert_eq!(path_out.trim(), expected_path.display().to_string());
+
+    let init_out = run_ok_with_env(
+        &["config", "init"],
+        &[("HOME", home.to_str().unwrap())],
+        &["XDG_CONFIG_HOME", "XDG_DOWNLOAD_DIR"],
+    );
+    assert!(init_out.contains("wrote config"));
+    assert!(expected_path.is_file());
+
+    let config_text = fs::read_to_string(&expected_path).unwrap();
+    assert!(config_text.contains("db_path:"));
+    assert!(config_text.contains("download_dir:"));
+    assert!(config_text.contains("secret_key_env:"));
+
+    let json_out = run_ok_with_env(
+        &["config", "--json"],
+        &[("HOME", home.to_str().unwrap())],
+        &["XDG_CONFIG_HOME", "XDG_DOWNLOAD_DIR"],
+    );
+    let json: Value = serde_json::from_str(&json_out).unwrap();
+    assert_eq!(json["config_exists"], true);
+    assert_eq!(json["db_path"]["source"], "config_file");
+    assert_eq!(json["secret_key_env"]["value"], "ANNAS_ARCHIVE_SECRET_KEY");
+
+    let duplicate_init = Command::new(bin())
+        .args(["config", "init"])
+        .env("HOME", home.to_str().unwrap())
+        .env_remove("XDG_CONFIG_HOME")
+        .env_remove("XDG_DOWNLOAD_DIR")
+        .output()
+        .unwrap();
+    assert!(!duplicate_init.status.success());
+    assert!(String::from_utf8_lossy(&duplicate_init.stderr).contains("already exists"));
 
     let _ = fs::remove_dir_all(root);
 }

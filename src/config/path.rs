@@ -33,6 +33,25 @@ where
     }
 }
 
+pub fn compact_tilde_path<P>(path: P) -> String
+where
+    P: AsRef<Path>,
+{
+    let path = path.as_ref();
+
+    if let Some(home) = home_dir() {
+        if let Ok(relative) = path.strip_prefix(&home) {
+            if relative.as_os_str().is_empty() {
+                return "~".to_string();
+            }
+
+            return format!("~/{}", relative.display());
+        }
+    }
+
+    path.to_string_lossy().to_string()
+}
+
 pub(crate) fn xdg_user_dir(kind: &str) -> Result<Option<PathBuf>> {
     let env_key = format!("XDG_{kind}_DIR");
     if let Some(value) = env::var_os(&env_key) {
@@ -89,7 +108,7 @@ fn expand_xdg_path(value: &str) -> PathBuf {
 
 #[cfg(test)]
 mod tests {
-    use super::{expand_tilde_path, expand_xdg_path};
+    use super::{compact_tilde_path, expand_tilde_path, expand_xdg_path, home_dir};
 
     #[test]
     fn expands_tilde_paths() {
@@ -101,5 +120,12 @@ mod tests {
     fn expands_xdg_home_token() {
         let path = expand_xdg_path("$HOME/Downloads");
         assert!(path.to_string_lossy().ends_with("Downloads"));
+    }
+
+    #[test]
+    fn compacts_home_paths_back_to_tilde() {
+        let home = home_dir().unwrap();
+        let path = home.join("Downloads/example.pdf");
+        assert_eq!(compact_tilde_path(path), "~/Downloads/example.pdf");
     }
 }
