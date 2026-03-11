@@ -56,10 +56,16 @@ fn searches_fts_and_exact_codes() {
             "Large Language Models",
             "A. Researcher",
             "Machine learning ; NLP",
-            vec![ExactCode {
-                kind: "isbn13".into(),
-                value: "9780131103627".into(),
-            }],
+            vec![
+                ExactCode {
+                    kind: "isbn13".into(),
+                    value: "9780131103627".into(),
+                },
+                ExactCode {
+                    kind: "md5".into(),
+                    value: "abcdef0123456789abcdef0123456789".into(),
+                },
+            ],
         ),
         sample_record(
             "aa-2",
@@ -79,8 +85,8 @@ fn searches_fts_and_exact_codes() {
     assert!(has_fts_rows(&conn).unwrap());
 
     let filters = SearchFilters {
-        language: Some("en".into()),
-        extension: Some("pdf".into()),
+        language: Some("EN".into()),
+        extension: Some("PDF".into()),
         year: Some(2024),
         limit: 10,
     };
@@ -95,6 +101,11 @@ fn searches_fts_and_exact_codes() {
     assert_eq!(exact_results.len(), 1);
     assert_eq!(exact_results[0].aa_id, "aa-1");
     assert!(exact_results[0].bm25_score.is_none());
+
+    let md5_results =
+        search_exact(&conn, &["md5"], "ABCDEF0123456789ABCDEF0123456789", &filters).unwrap();
+    assert_eq!(md5_results.len(), 1);
+    assert_eq!(md5_results[0].aa_id, "aa-1");
 }
 
 #[test]

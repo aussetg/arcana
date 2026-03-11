@@ -128,7 +128,7 @@ pub fn exact_sql(kinds: &[&str], filters: &SearchFilters) -> (String, Vec<Value>
         WHERE EXISTS (\
             SELECT 1 FROM record_codes rc \
             WHERE rc.rid = r.rid \
-              AND rc.value = ?",
+              AND lower(rc.value) = lower(?)",
     );
 
     let mut params = Vec::new();
@@ -160,12 +160,12 @@ pub fn exact_sql(kinds: &[&str], filters: &SearchFilters) -> (String, Vec<Value>
 
 fn push_filter_clauses(sql: &mut String, params: &mut Vec<Value>, filters: &SearchFilters) {
     if let Some(language) = &filters.language {
-        sql.push_str(" AND r.language = ?");
+        sql.push_str(" AND lower(r.language) = lower(?)");
         params.push(Value::Text(language.clone()));
     }
 
     if let Some(extension) = &filters.extension {
-        sql.push_str(" AND r.extension = ?");
+        sql.push_str(" AND lower(r.extension) = lower(?)");
         params.push(Value::Text(extension.clone()));
     }
 
@@ -203,8 +203,8 @@ mod tests {
         let (sql, params) = keyword_sql(&filters);
 
         assert!(sql.contains("records_fts MATCH ?"));
-        assert!(sql.contains("r.language = ?"));
-        assert!(sql.contains("r.extension = ?"));
+        assert!(sql.contains("lower(r.language) = lower(?)"));
+        assert!(sql.contains("lower(r.extension) = lower(?)"));
         assert!(sql.contains("r.year = ?"));
         assert_eq!(params.len(), 4);
     }
@@ -220,6 +220,7 @@ mod tests {
 
         let (sql, params) = exact_sql(&["isbn10", "isbn13"], &filters);
 
+        assert!(sql.contains("lower(rc.value) = lower(?)"));
         assert!(sql.contains("rc.kind IN (?, ?)"));
         assert_eq!(params.len(), 4);
     }
@@ -237,8 +238,8 @@ mod tests {
 
         assert!(sql.contains("SELECT COUNT(*)"));
         assert!(sql.contains("records_fts MATCH ?"));
-        assert!(sql.contains("r.language = ?"));
-        assert!(sql.contains("r.extension = ?"));
+        assert!(sql.contains("lower(r.language) = lower(?)"));
+        assert!(sql.contains("lower(r.extension) = lower(?)"));
         assert!(sql.contains("r.year = ?"));
         assert_eq!(params.len(), 3);
     }
