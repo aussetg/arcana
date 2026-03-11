@@ -10,6 +10,8 @@ use reqwest::blocking::Client;
 use rusqlite::{Connection, params};
 use serde::Deserialize;
 
+use crate::records::{RecordSelector, RecordSummary, resolve_unique_record};
+
 #[derive(Debug, Args)]
 pub struct DownloadArgs {
     #[arg(
@@ -51,25 +53,6 @@ pub struct DownloadArgs {
     pub no_link: bool,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct DownloadRecord {
-    rid: i64,
-    aa_id: String,
-    md5: String,
-    title: Option<String>,
-    original_filename: Option<String>,
-    extension: Option<String>,
-    local_path: Option<String>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-enum DownloadSelector {
-    AaId(String),
-    Md5(String),
-    Isbn(String),
-    Doi(String),
-}
-
 #[derive(Debug, Deserialize)]
 struct FastDownloadResponse {
     download_url: Option<String>,
@@ -77,7 +60,12 @@ struct FastDownloadResponse {
 }
 
 pub fn run(args: DownloadArgs) -> Result<()> {
-    let selector = selector_from_args(&args)?;
+    let selector = RecordSelector::from_exact_args(
+        args.aa_id.as_deref(),
+        args.md5.as_deref(),
+        args.isbn.as_deref(),
+        args.doi.as_deref(),
+    )?;
     let config = crate::config::load()?;
     let db_path = args.db.clone().unwrap_or(config.db_path()?);
     let output_dir = args.output_dir.clone().unwrap_or(config.download_dir()?);
@@ -86,7 +74,12 @@ pub fn run(args: DownloadArgs) -> Result<()> {
         .with_context(|| format!("failed to open {}", db_path.display()))?;
     crate::db::pragmas::apply_query_pragmas(&conn)?;
 
-    let record = resolve_download_record(&conn, &selector)?;
+    let record = resolve_unique_record(&conn, &selector)?;
+    let record_md5 = record
+        .md5
+        .as_deref()
+        .filter(|md5| !md5.trim().is_empty())
+        .context("record has no md5; fast download API requires md5")?;
     let destination = destination_path(&output_dir, &record)?;
 
     if let Some(existing_local_path) = &record.local_path {
@@ -117,7 +110,7 @@ pub fn run(args: DownloadArgs) -> Result<()> {
     let download_url = request_fast_download_url(
         &client,
         config.fast_download_api_url(),
-        &record.md5,
+        record_md5,
         &secret_key,
         args.path_index,
         args.domain_index,
@@ -133,135 +126,7 @@ pub fn run(args: DownloadArgs) -> Result<()> {
     Ok(())
 }
 
-fn selector_from_args(args: &DownloadArgs) -> Result<DownloadSelector> {
-    let selectors = [
-        args.aa_id.is_some(),
-        args.md5.is_some(),
-        args.isbn.is_some(),
-        args.doi.is_some(),
-    ]
-    .into_iter()
-    .filter(|present| *present)
-    .count();
-
-    if selectors == 0 {
-        bail!("provide exactly one of --aa-id, --md5, --isbn, or --doi")
-    }
-
-    if selectors > 1 {
-        bail!("use only one of --aa-id, --md5, --isbn, or --doi")
-    }
-
-    if let Some(aa_id) = &args.aa_id {
-        return Ok(DownloadSelector::AaId(aa_id.trim().to_string()));
-    }
-    if let Some(md5) = &args.md5 {
-        return Ok(DownloadSelector::Md5(md5.trim().to_string()));
-    }
-    if let Some(isbn) = &args.isbn {
-        return Ok(DownloadSelector::Isbn(isbn.trim().to_string()));
-    }
-    if let Some(doi) = &args.doi {
-        return Ok(DownloadSelector::Doi(doi.trim().to_string()));
-    }
-
-    bail!("unreachable selector state")
-}
-
-fn resolve_download_record(
-    conn: &Connection,
-    selector: &DownloadSelector,
-) -> Result<DownloadRecord> {
-    match selector {
-        DownloadSelector::AaId(aa_id) => resolve_unique_record(
-            conn,
-            "SELECT rid, aa_id, md5, title, original_filename, extension, local_path FROM records WHERE aa_id = ?1 LIMIT 2",
-            params![aa_id],
-        ),
-        DownloadSelector::Md5(md5) => resolve_unique_record_by_code(conn, &["md5"], md5),
-        DownloadSelector::Isbn(isbn) => {
-            resolve_unique_record_by_code(conn, &["isbn10", "isbn13"], isbn)
-        }
-        DownloadSelector::Doi(doi) => resolve_unique_record_by_code(conn, &["doi"], doi),
-    }
-}
-
-fn resolve_unique_record_by_code(
-    conn: &Connection,
-    kinds: &[&str],
-    value: &str,
-) -> Result<DownloadRecord> {
-    let mut sql = String::from(
-        "SELECT DISTINCT r.rid, r.aa_id, r.md5, r.title, r.original_filename, r.extension, r.local_path
-         FROM records r
-         JOIN record_codes rc ON rc.rid = r.rid
-         WHERE lower(rc.value) = lower(?1) AND rc.kind IN (",
-    );
-
-    for (index, _) in kinds.iter().enumerate() {
-        if index > 0 {
-            sql.push_str(", ");
-        }
-        sql.push('?');
-        sql.push_str(&(index + 2).to_string());
-    }
-    sql.push_str(") ORDER BY r.rid LIMIT 2");
-
-    let mut params_vec = vec![rusqlite::types::Value::Text(value.to_string())];
-    for kind in kinds {
-        params_vec.push(rusqlite::types::Value::Text((*kind).to_string()));
-    }
-
-    let mut stmt = conn.prepare(&sql)?;
-    let rows = stmt
-        .query_map(
-            rusqlite::params_from_iter(params_vec),
-            map_download_record_row,
-        )?
-        .collect::<std::result::Result<Vec<_>, _>>()?;
-
-    collapse_unique_record(rows)
-}
-
-fn resolve_unique_record<P>(conn: &Connection, sql: &str, params: P) -> Result<DownloadRecord>
-where
-    P: rusqlite::Params,
-{
-    let mut stmt = conn.prepare(sql)?;
-    let rows = stmt
-        .query_map(params, map_download_record_row)?
-        .collect::<std::result::Result<Vec<_>, _>>()?;
-
-    collapse_unique_record(rows)
-}
-
-fn map_download_record_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<DownloadRecord> {
-    let md5: Option<String> = row.get(2)?;
-    Ok(DownloadRecord {
-        rid: row.get(0)?,
-        aa_id: row.get(1)?,
-        md5: md5.unwrap_or_default(),
-        title: row.get(3)?,
-        original_filename: row.get(4)?,
-        extension: row.get(5)?,
-        local_path: row.get(6)?,
-    })
-}
-
-fn collapse_unique_record(rows: Vec<DownloadRecord>) -> Result<DownloadRecord> {
-    match rows.as_slice() {
-        [] => bail!("no matching record found"),
-        [record] => {
-            if record.md5.trim().is_empty() {
-                bail!("record has no md5; fast download API requires md5")
-            }
-            Ok(record.clone())
-        }
-        _ => bail!("multiple records matched; refine the selector"),
-    }
-}
-
-fn destination_path(output_dir: &Path, record: &DownloadRecord) -> Result<PathBuf> {
+fn destination_path(output_dir: &Path, record: &RecordSummary) -> Result<PathBuf> {
     let file_name = if let Some(original_filename) = &record.original_filename {
         sanitize_file_name(original_filename)
     } else {
@@ -417,11 +282,9 @@ mod tests {
     use tiny_http::{Method, Response, Server};
 
     use crate::model::{ExactCode, ExtractedRecord, FlatRecord};
+    use crate::records::{RecordSelector, RecordSummary, resolve_unique_record};
 
-    use super::{
-        DownloadRecord, DownloadSelector, destination_path, request_fast_download_url,
-        resolve_download_record, sanitize_file_name,
-    };
+    use super::{destination_path, request_fast_download_url, sanitize_file_name};
 
     fn sample_record(aa_id: &str, md5: &str, isbn13: Option<&str>) -> ExtractedRecord {
         ExtractedRecord {
@@ -478,10 +341,12 @@ mod tests {
         crate::commands::build::insert_batch(&mut conn, &mut batch).unwrap();
 
         let record =
-            resolve_download_record(&conn, &DownloadSelector::Isbn("9780131103627".into()))
-                .unwrap();
+            resolve_unique_record(&conn, &RecordSelector::Isbn("9780131103627".into())).unwrap();
         assert_eq!(record.aa_id, "aa-1");
-        assert_eq!(record.md5, "abcdef0123456789abcdef0123456789");
+        assert_eq!(
+            record.md5.as_deref(),
+            Some("abcdef0123456789abcdef0123456789")
+        );
     }
 
     #[test]
@@ -491,10 +356,10 @@ mod tests {
             "bad_name_here_.pdf"
         );
 
-        let record = DownloadRecord {
+        let record = RecordSummary {
             rid: 1,
             aa_id: "aa-1".into(),
-            md5: "abcdef0123456789abcdef0123456789".into(),
+            md5: Some("abcdef0123456789abcdef0123456789".into()),
             title: None,
             original_filename: Some("bad/name.pdf".into()),
             extension: Some("pdf".into()),

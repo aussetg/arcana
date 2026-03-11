@@ -5,5 +5,6 @@ pub mod db;
 pub mod extract;
 pub mod model;
 pub mod normalize;
+pub mod records;
 pub mod search;
 pub mod subjects;
