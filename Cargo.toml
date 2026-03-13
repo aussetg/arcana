@@ -4,6 +4,10 @@ version = "0.1.0"
 edition = "2024"
 description = "Local archive SQLite search CLI"
 
+[profile.release]
+lto = "thin"
+codegen-units = 1
+
 [dependencies]
 anyhow = "1"
 clap = { version = "4", features = ["derive"] }

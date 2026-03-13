@@ -1,0 +1,5 @@
+[build]
+rustflags = ["-C", "target-cpu=native"]
+
+[env]
+CFLAGS = "-march=native -mtune=native -O3"
