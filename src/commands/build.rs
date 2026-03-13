@@ -37,8 +37,7 @@ const INSERT_RECORD_SQL: &str = "INSERT INTO records (
     ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22
 )";
 
-const INSERT_CODE_SQL: &str =
-    "INSERT INTO record_codes (rid, kind, value) VALUES (?1, ?2, ?3)";
+const INSERT_CODE_SQL: &str = "INSERT INTO record_codes (rid, kind, value) VALUES (?1, ?2, ?3)";
 
 #[derive(Debug, Args)]
 pub struct BuildArgs {
@@ -99,6 +98,8 @@ pub fn run(args: BuildArgs) -> Result<()> {
     let mut insert_batches = 0usize;
     let mut insert_elapsed = Duration::ZERO;
     let mut ingest_elapsed = Duration::ZERO;
+    let mut read_elapsed = Duration::ZERO;
+    let mut parse_elapsed = Duration::ZERO;
 
     if let Some(input) = args.input.as_deref() {
         let shards = crate::extract::discover_input_shards(input, args.max_shards)?;
@@ -144,6 +145,8 @@ pub fn run(args: BuildArgs) -> Result<()> {
                 })?;
 
                 total_lines += file_stats.lines;
+                read_elapsed += file_stats.read_elapsed;
+                parse_elapsed += file_stats.parse_elapsed;
             }
 
             if !batch.is_empty() {
@@ -152,7 +155,6 @@ pub fn run(args: BuildArgs) -> Result<()> {
                 insert_elapsed += insert_started_at.elapsed();
                 insert_batches += 1;
             }
-
         }
 
         tx.commit()?;
@@ -186,15 +188,20 @@ pub fn run(args: BuildArgs) -> Result<()> {
     }
 
     if args.timings {
-        let parse_and_flatten_elapsed = ingest_elapsed.saturating_sub(insert_elapsed);
+        let unaccounted_ingest_elapsed = ingest_elapsed
+            .saturating_sub(read_elapsed)
+            .saturating_sub(parse_elapsed)
+            .saturating_sub(insert_elapsed);
         println!(
-            "timings: total={:.3}s prepare={:.3}s ingest={:.3}s parse+flatten+gzip={:.3}s insert={:.3}s insert_batches={} fts_rebuild={:.3}s secondary_indexes={:.3}s finalize={:.3}s",
+            "timings: total={:.3}s prepare={:.3}s ingest={:.3}s read+gzip={:.3}s parse+flatten={:.3}s insert={:.3}s insert_batches={} ingest_other={:.3}s fts_rebuild={:.3}s secondary_indexes={:.3}s finalize={:.3}s",
             total_elapsed.as_secs_f64(),
             prepare_elapsed.as_secs_f64(),
             ingest_elapsed.as_secs_f64(),
-            parse_and_flatten_elapsed.as_secs_f64(),
+            read_elapsed.as_secs_f64(),
+            parse_elapsed.as_secs_f64(),
             insert_elapsed.as_secs_f64(),
             insert_batches,
+            unaccounted_ingest_elapsed.as_secs_f64(),
             populate_fts_elapsed.as_secs_f64(),
             create_indexes_elapsed.as_secs_f64(),
             finalize_elapsed.as_secs_f64(),

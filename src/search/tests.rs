@@ -102,8 +102,13 @@ fn searches_fts_and_exact_codes() {
     assert_eq!(exact_results[0].aa_id, "aa-1");
     assert!(exact_results[0].bm25_score.is_none());
 
-    let md5_results =
-        search_exact(&conn, &["md5"], "ABCDEF0123456789ABCDEF0123456789", &filters).unwrap();
+    let md5_results = search_exact(
+        &conn,
+        &["md5"],
+        "ABCDEF0123456789ABCDEF0123456789",
+        &filters,
+    )
+    .unwrap();
     assert_eq!(md5_results.len(), 1);
     assert_eq!(md5_results[0].aa_id, "aa-1");
 }

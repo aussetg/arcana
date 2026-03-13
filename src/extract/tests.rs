@@ -1,6 +1,6 @@
 use serde_json::json;
 
-use super::flatten::flatten_document;
+use super::parse_ndjson_line;
 
 #[test]
 fn flattens_selected_fields_and_codes() {
@@ -43,7 +43,8 @@ fn flattens_selected_fields_and_codes() {
         }
     });
 
-    let extracted = flatten_document(&document).unwrap();
+    let line = serde_json::to_string(&document).unwrap();
+    let extracted = parse_ndjson_line(&line).unwrap();
 
     assert_eq!(extracted.record.aa_id, "aa-record-1");
     assert_eq!(extracted.record.title.as_deref(), Some("Search Title"));
