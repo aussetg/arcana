@@ -15,7 +15,13 @@ pub fn populate_fts(conn: &Connection) -> Result<()> {
     Ok(())
 }
 
+pub fn create_secondary_indexes(conn: &Connection) -> Result<()> {
+    schema::create_secondary_indexes(conn)?;
+    Ok(())
+}
+
 pub fn finalize_database(conn: &Connection) -> Result<()> {
+    create_secondary_indexes(conn)?;
     pragmas::finalize_database(conn)?;
     Ok(())
 }

@@ -58,19 +58,21 @@ CREATE TABLE record_codes (
     UNIQUE(rid, kind, value),
     FOREIGN KEY (rid) REFERENCES records(rid) ON DELETE CASCADE
 );
+"#;
 
-CREATE INDEX idx_record_codes_kind_value ON record_codes(kind, value);
-CREATE INDEX idx_record_codes_rid        ON record_codes(rid);
+const SECONDARY_INDEX_SQL: &str = r#"
+CREATE INDEX IF NOT EXISTS idx_record_codes_kind_value ON record_codes(kind, value);
+CREATE INDEX IF NOT EXISTS idx_record_codes_rid        ON record_codes(rid);
 
-CREATE INDEX idx_records_md5            ON records(md5);
-CREATE INDEX idx_records_isbn13         ON records(isbn13);
-CREATE INDEX idx_records_doi            ON records(doi);
-CREATE INDEX idx_records_year           ON records(year);
-CREATE INDEX idx_records_language       ON records(language);
-CREATE INDEX idx_records_extension      ON records(extension);
-CREATE INDEX idx_records_content_type   ON records(content_type);
-CREATE INDEX idx_records_primary_source ON records(primary_source);
-CREATE INDEX idx_records_local_path     ON records(local_path);
+CREATE INDEX IF NOT EXISTS idx_records_md5            ON records(md5);
+CREATE INDEX IF NOT EXISTS idx_records_isbn13         ON records(isbn13);
+CREATE INDEX IF NOT EXISTS idx_records_doi            ON records(doi);
+CREATE INDEX IF NOT EXISTS idx_records_year           ON records(year);
+CREATE INDEX IF NOT EXISTS idx_records_language       ON records(language);
+CREATE INDEX IF NOT EXISTS idx_records_extension      ON records(extension);
+CREATE INDEX IF NOT EXISTS idx_records_content_type   ON records(content_type);
+CREATE INDEX IF NOT EXISTS idx_records_primary_source ON records(primary_source);
+CREATE INDEX IF NOT EXISTS idx_records_local_path     ON records(local_path);
 "#;
 
 pub fn create_all(conn: &Connection) -> Result<()> {
@@ -79,11 +81,16 @@ pub fn create_all(conn: &Connection) -> Result<()> {
     Ok(())
 }
 
+pub fn create_secondary_indexes(conn: &Connection) -> Result<()> {
+    conn.execute_batch(SECONDARY_INDEX_SQL)?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use rusqlite::Connection;
 
-    use super::{USER_VERSION, create_all};
+    use super::{USER_VERSION, create_all, create_secondary_indexes};
 
     #[test]
     fn creates_expected_schema_objects() {
@@ -91,10 +98,27 @@ mod tests {
 
         create_all(&conn).unwrap();
 
+        for object_name in ["records", "records_fts", "record_codes"] {
+            let exists: i64 = conn
+                .query_row(
+                    "SELECT COUNT(*) FROM sqlite_master WHERE name = ?1",
+                    [object_name],
+                    |row| row.get(0),
+                )
+                .unwrap();
+
+            assert_eq!(exists, 1, "missing schema object: {object_name}");
+        }
+    }
+
+    #[test]
+    fn creates_secondary_indexes_when_requested() {
+        let conn = Connection::open_in_memory().unwrap();
+
+        create_all(&conn).unwrap();
+        create_secondary_indexes(&conn).unwrap();
+
         for object_name in [
-            "records",
-            "records_fts",
-            "record_codes",
             "idx_record_codes_kind_value",
             "idx_record_codes_rid",
             "idx_records_md5",

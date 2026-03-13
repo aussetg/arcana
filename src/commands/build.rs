@@ -1,12 +1,44 @@
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail};
 use clap::Args;
 use rusqlite::Connection;
-use rusqlite::params;
+use rusqlite::{Statement, Transaction, params};
 
 use crate::model::ExtractedRecord;
+
+const INSERT_RECORD_SQL: &str = "INSERT INTO records (
+    aa_id,
+    md5,
+    isbn13,
+    doi,
+    title,
+    author,
+    publisher,
+    edition_varia,
+    subjects,
+    description,
+    year,
+    language,
+    extension,
+    content_type,
+    filesize,
+    added_date,
+    primary_source,
+    score_base_rank,
+    cover_url,
+    original_filename,
+    has_aa_downloads,
+    has_torrent_paths
+) VALUES (
+    ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11,
+    ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22
+)";
+
+const INSERT_CODE_SQL: &str =
+    "INSERT INTO record_codes (rid, kind, value) VALUES (?1, ?2, ?3)";
 
 #[derive(Debug, Args)]
 pub struct BuildArgs {
@@ -27,7 +59,7 @@ pub struct BuildArgs {
     #[arg(long, help = "Replace an existing database file at --output")]
     pub replace: bool,
 
-    #[arg(long, default_value_t = 1000)]
+    #[arg(long, default_value_t = 10000)]
     pub batch_size: usize,
 
     #[arg(long)]
@@ -35,9 +67,14 @@ pub struct BuildArgs {
 
     #[arg(long)]
     pub max_records: Option<usize>,
+
+    #[arg(long, help = "Print phase timings for ingest profiling")]
+    pub timings: bool,
 }
 
 pub fn run(args: BuildArgs) -> Result<()> {
+    let total_started_at = Instant::now();
+
     if args.batch_size == 0 {
         bail!("--batch-size must be greater than zero");
     }
@@ -50,13 +87,18 @@ pub fn run(args: BuildArgs) -> Result<()> {
     let mut conn = Connection::open(&output)
         .with_context(|| format!("failed to open {}", output.display()))?;
 
+    let prepare_started_at = Instant::now();
     crate::db::prepare_database(&conn)
         .with_context(|| format!("failed to initialize {}", output.display()))?;
+    let prepare_elapsed = prepare_started_at.elapsed();
 
     let mut total_files = 0usize;
     let mut total_lines = 0usize;
     let mut total_records = 0usize;
     let mut total_codes = 0usize;
+    let mut insert_batches = 0usize;
+    let mut insert_elapsed = Duration::ZERO;
+    let mut ingest_elapsed = Duration::ZERO;
 
     if let Some(input) = args.input.as_deref() {
         let shards = crate::extract::discover_input_shards(input, args.max_shards)?;
@@ -67,42 +109,72 @@ pub fn run(args: BuildArgs) -> Result<()> {
 
         let mut batch = Vec::with_capacity(args.batch_size);
         let mut stop = false;
+        let tx = conn.transaction()?;
+        let ingest_started_at = Instant::now();
 
-        for shard in &shards {
-            if stop {
-                break;
+        {
+            let mut insert_record = tx.prepare(INSERT_RECORD_SQL)?;
+            let mut insert_code = tx.prepare(INSERT_CODE_SQL)?;
+
+            for shard in &shards {
+                if stop {
+                    break;
+                }
+
+                total_files += 1;
+
+                let file_stats = crate::extract::stream_records(shard, |record| {
+                    total_records += 1;
+                    total_codes += record.codes.len();
+                    batch.push(record);
+
+                    if batch.len() >= args.batch_size {
+                        let insert_started_at = Instant::now();
+                        insert_batch_in_tx(&tx, &mut insert_record, &mut insert_code, &mut batch)?;
+                        insert_elapsed += insert_started_at.elapsed();
+                        insert_batches += 1;
+                    }
+
+                    if args.max_records.is_some_and(|limit| total_records >= limit) {
+                        stop = true;
+                        return Ok(false);
+                    }
+
+                    Ok(true)
+                })?;
+
+                total_lines += file_stats.lines;
             }
 
-            total_files += 1;
+            if !batch.is_empty() {
+                let insert_started_at = Instant::now();
+                insert_batch_in_tx(&tx, &mut insert_record, &mut insert_code, &mut batch)?;
+                insert_elapsed += insert_started_at.elapsed();
+                insert_batches += 1;
+            }
 
-            let file_stats = crate::extract::stream_records(shard, |record| {
-                total_records += 1;
-                total_codes += record.codes.len();
-                batch.push(record);
-
-                if batch.len() >= args.batch_size {
-                    insert_batch(&mut conn, &mut batch)?;
-                }
-
-                if args.max_records.is_some_and(|limit| total_records >= limit) {
-                    stop = true;
-                    return Ok(false);
-                }
-
-                Ok(true)
-            })?;
-
-            total_lines += file_stats.lines;
         }
 
-        insert_batch(&mut conn, &mut batch)?;
+        tx.commit()?;
+        ingest_elapsed = ingest_started_at.elapsed();
     }
 
+    let populate_fts_started_at = Instant::now();
     crate::db::populate_fts(&conn)
         .with_context(|| format!("failed to populate FTS in {}", output.display()))?;
+    let populate_fts_elapsed = populate_fts_started_at.elapsed();
 
-    crate::db::finalize_database(&conn)
+    let create_indexes_started_at = Instant::now();
+    crate::db::create_secondary_indexes(&conn)
+        .with_context(|| format!("failed to build secondary indexes in {}", output.display()))?;
+    let create_indexes_elapsed = create_indexes_started_at.elapsed();
+
+    let finalize_started_at = Instant::now();
+    crate::db::pragmas::finalize_database(&conn)
         .with_context(|| format!("failed to finalize {}", output.display()))?;
+    let finalize_elapsed = finalize_started_at.elapsed();
+
+    let total_elapsed = total_started_at.elapsed();
 
     if args.input.is_some() {
         println!(
@@ -113,47 +185,49 @@ pub fn run(args: BuildArgs) -> Result<()> {
         println!("initialized empty database: {}", output.display());
     }
 
+    if args.timings {
+        let parse_and_flatten_elapsed = ingest_elapsed.saturating_sub(insert_elapsed);
+        println!(
+            "timings: total={:.3}s prepare={:.3}s ingest={:.3}s parse+flatten+gzip={:.3}s insert={:.3}s insert_batches={} fts_rebuild={:.3}s secondary_indexes={:.3}s finalize={:.3}s",
+            total_elapsed.as_secs_f64(),
+            prepare_elapsed.as_secs_f64(),
+            ingest_elapsed.as_secs_f64(),
+            parse_and_flatten_elapsed.as_secs_f64(),
+            insert_elapsed.as_secs_f64(),
+            insert_batches,
+            populate_fts_elapsed.as_secs_f64(),
+            create_indexes_elapsed.as_secs_f64(),
+            finalize_elapsed.as_secs_f64(),
+        );
+    }
+
     Ok(())
 }
 
+#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) fn insert_batch(conn: &mut Connection, batch: &mut Vec<ExtractedRecord>) -> Result<()> {
     if batch.is_empty() {
         return Ok(());
     }
 
     let tx = conn.transaction()?;
-    let mut insert_record = tx.prepare(
-        "INSERT INTO records (
-            aa_id,
-            md5,
-            isbn13,
-            doi,
-            title,
-            author,
-            publisher,
-            edition_varia,
-            subjects,
-            description,
-            year,
-            language,
-            extension,
-            content_type,
-            filesize,
-            added_date,
-            primary_source,
-            score_base_rank,
-            cover_url,
-            original_filename,
-            has_aa_downloads,
-            has_torrent_paths
-        ) VALUES (
-            ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11,
-            ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22
-        )",
-    )?;
-    let mut insert_code =
-        tx.prepare("INSERT INTO record_codes (rid, kind, value) VALUES (?1, ?2, ?3)")?;
+    let mut insert_record = tx.prepare(INSERT_RECORD_SQL)?;
+    let mut insert_code = tx.prepare(INSERT_CODE_SQL)?;
 
+    insert_batch_in_tx(&tx, &mut insert_record, &mut insert_code, batch)?;
+
+    drop(insert_code);
+    drop(insert_record);
+    tx.commit()?;
+    Ok(())
+}
+
+fn insert_batch_in_tx(
+    tx: &Transaction<'_>,
+    insert_record: &mut Statement<'_>,
+    insert_code: &mut Statement<'_>,
+    batch: &mut Vec<ExtractedRecord>,
+) -> Result<()> {
     for extracted in batch.drain(..) {
         let record = extracted.record;
 
@@ -189,9 +263,6 @@ pub(crate) fn insert_batch(conn: &mut Connection, batch: &mut Vec<ExtractedRecor
         }
     }
 
-    drop(insert_code);
-    drop(insert_record);
-    tx.commit()?;
     Ok(())
 }
 

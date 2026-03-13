@@ -3,8 +3,9 @@ use rusqlite::Connection;
 
 const BUILD_PRAGMAS_SQL: &str = r#"
 PRAGMA foreign_keys = ON;
-PRAGMA journal_mode = WAL;
-PRAGMA synchronous = NORMAL;
+PRAGMA journal_mode = MEMORY;
+PRAGMA synchronous = OFF;
+PRAGMA locking_mode = EXCLUSIVE;
 PRAGMA temp_store = MEMORY;
 PRAGMA mmap_size = 30000000000;
 PRAGMA cache_size = -1000000;
@@ -21,6 +22,9 @@ const FINALIZE_SQL: &str = r#"
 ANALYZE;
 INSERT INTO records_fts(records_fts) VALUES('optimize');
 VACUUM;
+PRAGMA journal_mode = WAL;
+PRAGMA synchronous = NORMAL;
+PRAGMA locking_mode = NORMAL;
 "#;
 
 pub fn apply_build_pragmas(conn: &Connection) -> Result<()> {
