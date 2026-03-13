@@ -55,6 +55,7 @@ struct IngestStats {
     insert_elapsed: Duration,
     ingest_elapsed: Duration,
     jobs: usize,
+    worker_stats: Vec<WorkerStats>,
 }
 
 struct WorkerBatch {
@@ -68,16 +69,28 @@ struct ShardPlan {
     max_records: Option<usize>,
 }
 
+#[derive(Debug, Default, Clone)]
+struct WorkerStats {
+    worker_id: usize,
+    files: usize,
+    lines: usize,
+    read_elapsed: Duration,
+    parse_elapsed: Duration,
+    wall_elapsed: Duration,
+    batches_sent: usize,
+}
+
 #[derive(Debug, Default, Clone, Copy)]
 struct WorkerShardStats {
     lines: usize,
     read_elapsed: Duration,
     parse_elapsed: Duration,
+    batches_sent: usize,
 }
 
 enum WorkerMessage {
     Batch(WorkerBatch),
-    ShardDone(WorkerShardStats),
+    WorkerDone(WorkerStats),
     Error(String),
 }
 
@@ -222,6 +235,22 @@ pub fn run(args: BuildArgs) -> Result<()> {
             create_indexes_elapsed.as_secs_f64(),
             finalize_elapsed.as_secs_f64(),
         );
+
+        let mut worker_stats = ingest_stats.worker_stats.clone();
+        worker_stats.sort_by_key(|stats| stats.worker_id);
+
+        for worker in worker_stats {
+            println!(
+                "timings-worker[{}]: files={} lines={} batches_sent={} wall={:.3}s read+gzip={:.3}s parse+flatten={:.3}s",
+                worker.worker_id,
+                worker.files,
+                worker.lines,
+                worker.batches_sent,
+                worker.wall_elapsed.as_secs_f64(),
+                worker.read_elapsed.as_secs_f64(),
+                worker.parse_elapsed.as_secs_f64(),
+            );
+        }
     }
 
     Ok(())
@@ -348,6 +377,15 @@ fn ingest_shards_sequential(
 
     tx.commit()?;
     stats.ingest_elapsed = ingest_started_at.elapsed();
+    stats.worker_stats.push(WorkerStats {
+        worker_id: 0,
+        files: stats.total_files,
+        lines: stats.total_lines,
+        read_elapsed: stats.read_elapsed,
+        parse_elapsed: stats.parse_elapsed,
+        wall_elapsed: stats.ingest_elapsed,
+        batches_sent: stats.insert_batches,
+    });
     Ok(stats)
 }
 
@@ -370,13 +408,19 @@ fn ingest_shards_parallel(
     let mut insert_record = tx.prepare(INSERT_RECORD_SQL)?;
     let mut insert_code = tx.prepare(INSERT_CODE_SQL)?;
 
-    for _ in 0..jobs {
+    for worker_id in 0..jobs {
         let worker_queue = Arc::clone(&queue);
         let worker_stop = Arc::clone(&stop);
         let worker_sender = sender.clone();
 
         workers.push(thread::spawn(move || {
-            worker_ingest_loop(worker_queue, worker_stop, worker_sender, batch_size)
+            worker_ingest_loop(
+                worker_id,
+                worker_queue,
+                worker_stop,
+                worker_sender,
+                batch_size,
+            )
         }));
     }
 
@@ -404,11 +448,12 @@ fn ingest_shards_parallel(
                 stats.insert_elapsed += insert_started_at.elapsed();
                 stats.insert_batches += 1;
             }
-            WorkerMessage::ShardDone(shard_stats) => {
-                stats.total_files += 1;
-                stats.total_lines += shard_stats.lines;
-                stats.read_elapsed += shard_stats.read_elapsed;
-                stats.parse_elapsed += shard_stats.parse_elapsed;
+            WorkerMessage::WorkerDone(worker_stats) => {
+                stats.total_files += worker_stats.files;
+                stats.total_lines += worker_stats.lines;
+                stats.read_elapsed += worker_stats.read_elapsed;
+                stats.parse_elapsed += worker_stats.parse_elapsed;
+                stats.worker_stats.push(worker_stats);
             }
             WorkerMessage::Error(error) => {
                 worker_error = Some(anyhow::anyhow!(error));
@@ -449,14 +494,21 @@ fn ingest_shards_parallel(
 }
 
 fn worker_ingest_loop(
+    worker_id: usize,
     queue: Arc<Mutex<VecDeque<ShardPlan>>>,
     stop: Arc<AtomicBool>,
     sender: mpsc::SyncSender<WorkerMessage>,
     batch_size: usize,
 ) -> Result<()> {
+    let started_at = Instant::now();
+    let mut worker_stats = WorkerStats {
+        worker_id,
+        ..WorkerStats::default()
+    };
+
     loop {
         if stop.load(Ordering::Relaxed) {
-            return Ok(());
+            break;
         }
 
         let Some(shard) = queue
@@ -464,30 +516,43 @@ fn worker_ingest_loop(
             .map_err(|_| anyhow::anyhow!("ingest shard queue mutex poisoned"))?
             .pop_front()
         else {
-            return Ok(());
+            break;
         };
 
-        if let Err(error) = worker_ingest_shard(&shard, &sender, batch_size) {
-            stop.store(true, Ordering::Relaxed);
-            let _ = sender.send(WorkerMessage::Error(error.to_string()));
-            return Ok(());
+        match worker_ingest_shard(&shard, &sender, batch_size) {
+            Ok(shard_stats) => {
+                worker_stats.files += 1;
+                worker_stats.lines += shard_stats.lines;
+                worker_stats.read_elapsed += shard_stats.read_elapsed;
+                worker_stats.parse_elapsed += shard_stats.parse_elapsed;
+                worker_stats.batches_sent += shard_stats.batches_sent;
+            }
+            Err(error) => {
+                stop.store(true, Ordering::Relaxed);
+                let _ = sender.send(WorkerMessage::Error(error.to_string()));
+                return Ok(());
+            }
         }
     }
+
+    worker_stats.wall_elapsed = started_at.elapsed();
+    let _ = sender.send(WorkerMessage::WorkerDone(worker_stats));
+    Ok(())
 }
 
 fn worker_ingest_shard(
     plan: &ShardPlan,
     sender: &mpsc::SyncSender<WorkerMessage>,
     batch_size: usize,
-) -> Result<()> {
+) -> Result<WorkerShardStats> {
     if plan.max_records == Some(0) {
-        let _ = sender.send(WorkerMessage::ShardDone(WorkerShardStats::default()));
-        return Ok(());
+        return Ok(WorkerShardStats::default());
     }
 
     let mut batch = Vec::with_capacity(batch_size);
     let mut batch_codes = 0usize;
     let mut shard_records = 0usize;
+    let mut batches_sent = 0usize;
 
     let file_stats = crate::extract::stream_records(&plan.path, |record| {
         shard_records += 1;
@@ -505,6 +570,7 @@ fn worker_ingest_shard(
                 return Ok(false);
             }
 
+            batches_sent += 1;
             batch_codes = 0;
             batch = Vec::with_capacity(batch_size);
         }
@@ -524,17 +590,24 @@ fn worker_ingest_shard(
             }))
             .is_err()
     {
-        return Ok(());
+        return Ok(WorkerShardStats {
+            lines: file_stats.lines,
+            read_elapsed: file_stats.read_elapsed,
+            parse_elapsed: file_stats.parse_elapsed,
+            batches_sent,
+        });
     }
 
-    let shard_stats = WorkerShardStats {
+    if !file_stats.records.eq(&0) && (file_stats.records % batch_size != 0) {
+        batches_sent += 1;
+    }
+
+    Ok(WorkerShardStats {
         lines: file_stats.lines,
         read_elapsed: file_stats.read_elapsed,
         parse_elapsed: file_stats.parse_elapsed,
-    };
-
-    let _ = sender.send(WorkerMessage::ShardDone(shard_stats));
-    Ok(())
+        batches_sent,
+    })
 }
 
 #[cfg_attr(not(test), allow(dead_code))]
