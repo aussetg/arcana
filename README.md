@@ -36,7 +36,7 @@ cargo build --release
 
 Then use either:
 
-- `cargo run -- ...`
+- `arcana ...`
 - or `target/release/arcana ...`
 
 ## Input data
@@ -53,13 +53,13 @@ It does **not** require Elasticsearch for the local build pipeline.
 Initialize a config file:
 
 ```sh
-cargo run -- config init
+arcana config init
 ```
 
 Build a small test database:
 
 ```sh
-cargo run -- build \
+arcana build \
   --input ~/Datasets/Anna\'s\ Archive/aa_derived_mirror_metadata_20260208/elasticsearch \
   --output data/arcana.sqlite3 \
   --max-shards 1 \
@@ -69,20 +69,20 @@ cargo run -- build \
 Search it:
 
 ```sh
-cargo run -- search --db data/arcana.sqlite3 "large language models"
+arcana search --db data/arcana.sqlite3 "large language models"
 ```
 
 Link local files:
 
 ```sh
-cargo run -- link-local --db data/arcana.sqlite3 --scan ~/Books
+arcana link-local --db data/arcana.sqlite3 --scan ~/Books
 ```
 
 Download by ISBN:
 
 ```sh
 ANNAS_ARCHIVE_SECRET_KEY=... \
-cargo run -- download --db data/arcana.sqlite3 --isbn 9780131103627
+arcana download --db data/arcana.sqlite3 --isbn 9780131103627
 ```
 
 ## Configuration
@@ -117,10 +117,10 @@ Notes:
 Useful config commands:
 
 ```sh
-cargo run -- config
-cargo run -- config path
-cargo run -- config --json
-cargo run -- config init --force
+arcana config
+arcana config path
+arcana config --json
+arcana config init --force
 ```
 
 ## Commands
@@ -132,13 +132,13 @@ Create a database, optionally ingesting shards immediately.
 Initialize an empty database:
 
 ```sh
-cargo run -- build --output data/arcana.sqlite3
+arcana build --output data/arcana.sqlite3
 ```
 
 Build from shards:
 
 ```sh
-cargo run -- build \
+arcana build \
   --input ~/path/to/elasticsearch \
   --output data/arcana.sqlite3
 ```
@@ -146,7 +146,7 @@ cargo run -- build \
 Rebuild in place:
 
 ```sh
-cargo run -- build \
+arcana build \
   --input ~/path/to/elasticsearch \
   --output data/arcana.sqlite3 \
   --replace
@@ -155,7 +155,7 @@ cargo run -- build \
 Show ingest phase timings:
 
 ```sh
-cargo run -- build \
+arcana build \
   --input ~/path/to/elasticsearch \
   --output data/arcana.sqlite3 \
   --replace \
@@ -167,19 +167,19 @@ cargo run -- build \
 Keyword search:
 
 ```sh
-cargo run -- search --db data/arcana.sqlite3 "transformer interpretability"
+arcana search --db data/arcana.sqlite3 "transformer interpretability"
 ```
 
 Exact lookup:
 
 ```sh
-cargo run -- search --db data/arcana.sqlite3 --isbn 9780131103627
+arcana search --db data/arcana.sqlite3 --isbn 9780131103627
 ```
 
 Filtered search:
 
 ```sh
-cargo run -- search \
+arcana search \
   --db data/arcana.sqlite3 \
   --language en \
   --extension pdf \
@@ -190,19 +190,19 @@ cargo run -- search \
 JSON output:
 
 ```sh
-cargo run -- search --db data/arcana.sqlite3 --json "large language models"
+arcana search --db data/arcana.sqlite3 --json "large language models"
 ```
 
 Optional local query expansion:
 
 ```sh
-cargo run -- search --db data/arcana.sqlite3 --expand "llm interpretability"
+arcana search --db data/arcana.sqlite3 --expand "llm interpretability"
 ```
 
 Debug expansion behavior:
 
 ```sh
-cargo run -- search --db data/arcana.sqlite3 --expand --expand-debug "rag evaluation"
+arcana search --db data/arcana.sqlite3 --expand --expand-debug "rag evaluation"
 ```
 
 ### `link-local`
@@ -210,13 +210,13 @@ cargo run -- search --db data/arcana.sqlite3 --expand --expand-debug "rag evalua
 Scan a directory tree and link matching local files into the database.
 
 ```sh
-cargo run -- link-local --db data/arcana.sqlite3 --scan ~/Books
+arcana link-local --db data/arcana.sqlite3 --scan ~/Books
 ```
 
 Dry-run with verbose decisions and content hashing:
 
 ```sh
-cargo run -- link-local \
+arcana link-local \
   --db data/arcana.sqlite3 \
   --scan ~/Books \
   --dry-run \
@@ -230,7 +230,7 @@ Download a matching record by `--aa-id`, `--md5`, `--isbn`, or `--doi`.
 
 ```sh
 ANNAS_ARCHIVE_SECRET_KEY=... \
-cargo run -- download \
+arcana download \
   --db data/arcana.sqlite3 \
   --isbn 9780131103627 \
   --verify-md5
@@ -240,7 +240,7 @@ Use a flat output name and JSON output:
 
 ```sh
 ANNAS_ARCHIVE_SECRET_KEY=... \
-cargo run -- download \
+arcana download \
   --db data/arcana.sqlite3 \
   --isbn 9780131103627 \
   --filename-mode flat \
